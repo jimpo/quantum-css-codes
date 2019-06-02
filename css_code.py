@@ -53,6 +53,9 @@ class CSSCode(object):
         self.r_2 = r_2
         self.parity_check_c1 = h_1
         self.parity_check_c2 = h_2
+        t_1, self._c1_syndromes = syndrome_table(h_1)
+        t_2, self._c2_syndromes = syndrome_table(h_2)
+        self.t = min(t_1, t_2)
 
     def stabilisers(self) -> List[PauliTerm]:
         zeros = np.zeros(self.n, dtype='int')
@@ -140,6 +143,55 @@ class CSSCode(object):
 
         return prog
 
+
+def syndrome_table(parity_check):
+    """
+    Given a parity check matrix of a binary linear code, determine the unique decoding threshold t
+    and return it along with a lookup table of syndromes to error terms of weight at most t. This
+    lookup table can be used to decode noisy codewords.
+    """
+    _, n = parity_check.shape
+
+    table = {}
+    for w in range(n + 1):
+        # t_table is a table of syndromes produced by weight-t errors.
+        t_table = {}
+        for e in weight_w_vectors(n, w):
+            syndrome = np.mod(np.matmul(parity_check, e), 2)
+            syndrome_int = vec_to_int(syndrome)
+            if syndrome_int in table or syndrome_int in t_table:
+                return w - 1, table
+            t_table[syndrome_int] = e
+        # Merge t_table into table
+        table = {**table, **t_table}
+    return n, table
+
+def vec_to_int(vec):
+    """
+    Convert a vector of bits to its big-endian int representation.
+    """
+    result = 0
+    for i in range(vec.size):
+        result = (result << 1) + vec[i]
+    return result
+
+def weight_w_vectors(n, w):
+    """
+    Generate a sequence of all length n binary vectors with Hamming weight w.
+    """
+    def helper(vec, w, start):
+        n = vec.size
+        if w == 0:
+            yield np.copy(vec)
+        else:
+            for i in range(start, n):
+                vec[i] = 1
+                yield from helper(vec, w - 1, i + 1)
+                vec[i] = 0
+
+    vec = np.zeros(n, dtype='int')
+    yield from helper(vec, w, 0)
+
 def transform_stabilisers(mat, prog):
     _, n = mat.shape
 
@@ -178,7 +230,6 @@ def conjugate_cnot_with_check_mat(mat, control, target):
     n = cols // 2
     c, t = control, target
 
-    print(c, t)
     for i in range(k):
         # CNOT propagates X paulis from control to target
         if mat[i, c] == 1:

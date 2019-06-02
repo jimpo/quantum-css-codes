@@ -64,3 +64,15 @@ class TestCSSCode(unittest.TestCase):
         expected_mat[6, 13:14] = np.identity(1, dtype='int')
 
         self.assertTrue(np.array_equal(mat, expected_mat))
+
+    def test_syndrome_table(self):
+        h = self.steane_7bit.parity_check_c1
+
+        t, table = css_code.syndrome_table(h)
+        self.assertEqual(t, 1)
+        self.assertEqual(len(table), 8)
+
+        for s, e in table.items():
+            syndrome = np.mod(np.matmul(h, e), 2)
+            computed_s = css_code.vec_to_int(syndrome)
+            self.assertEqual(s, computed_s)
