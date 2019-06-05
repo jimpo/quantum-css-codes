@@ -1,19 +1,20 @@
 import itertools
 import numpy as np
-from pyquil import Program
 import pyquil.gates as gates
 from pyquil.paulis import PauliTerm, ID, sX, sY, sZ
+from pyquil.quil import Program
 from pyquil.quilatom import Qubit, QubitPlaceholder
 from pyquil.quilbase import Gate
 from typing import List, Union
 
 import bin_matrix
+from qecc import CodeBlock, QECC
 import quil_classical
+from quil_classical import MemoryChunk
 from errors import InvalidCodeError
-from memory import MemoryChunk
 
 
-class CSSCode(object):
+class CSSCode(QECC):
     """
     A Calderbank-Steane-Shor (CSS) code is defined by two binary linear codes C_1, C_2 such that the
     dual code of C_2 is a subspace of C_1. If C_1 is a [n, k_1, d_1] code and C_2 is a [n, k_2, d_2]
@@ -51,15 +52,28 @@ class CSSCode(object):
         for indices in qubit_swaps:
             swap_columns(h_1, indices)
 
-        self.n = n_1
+        self._n = n_1
+        self._k = n_1 - r_1 - r_2
         self.r_1 = r_1
         self.r_2 = r_2
         self.parity_check_c1 = h_1
         self.parity_check_c2 = h_2
         t_1, self._c1_syndromes = syndrome_table(h_1)
         t_2, self._c2_syndromes = syndrome_table(h_2)
-        self.t = min(t_1, t_2)
+        self._t = min(t_1, t_2)
         self._transversal_gates = self._determine_transversal_gates(h_1, h_2)
+
+    @property
+    def n(self):
+        return self._n
+
+    @property
+    def k(self):
+        return self._k
+
+    @property
+    def t(self):
+        return self._t
 
     def stabilisers(self) -> List[PauliTerm]:
         zeros = np.zeros(self.n, dtype='int')
@@ -256,50 +270,60 @@ class CSSCode(object):
 
         return prog
 
-    def apply_transversal(self, gate_name: str, *blocks: List[QubitPlaceholder]) -> Program:
+    def encode_zero(self, prog: Program, qubits: List[Union[QubitPlaceholder, int]]):
+        # TODO: Make fault tolerant
+        prog += self.noisy_encode_zero(qubits)
+
+    def encode_plus(self, prog: Program, qubits: List[Union[QubitPlaceholder, int]]):
+        # TODO: Make fault tolerant
+        prog += self.noisy_encode_plus(qubits)
+
+    def apply_transversal(self, gate_name: str, *blocks: CodeBlock) -> Program:
         """
         Attempt to construct a program implementing the given gate transversally. If that cannot be
         done with this type of code, then return None.
         """
-        if gate_name not in self.is_transversal(gate_name):
+        if not self.is_transversal(gate_name):
             return None
 
+        qubits = (block.qubits for block in blocks)
+
         if gate_name == 'I':
-            return apply_transversally(gates.I, *blocks)
+            return apply_transversally(gates.I, *qubits)
         if gate_name == 'CNOT':
-            return apply_transversally(gates.CNOT, *blocks)
+            return apply_transversally(gates.CNOT, *qubits)
         if gate_name == 'H':
-            return apply_transversally(gates.H, *blocks)
+            return apply_transversally(gates.H, *qubits)
         if gate_name == 'CZ':
-            return apply_transversally(gates.CZ, *blocks)
+            return apply_transversally(gates.CZ, *qubits)
         if gate_name == 'PHASE':
             return apply_transversally(
-                lambda qubit: (gates.Z(qubit), gates.PHASE(qubit)), *blocks
+                lambda qubit: (gates.Z(qubit), gates.PHASE(qubit)), *qubits
             )
         raise NotImplementedError("transversal {} not implemented".format(gate_name))
 
     def apply_universal(self, gate_name, *blocks: List[QubitPlaceholder]):
         pass
 
-    def error_correct(self, data: CodeBlock,
+    def error_correct(self, prog: Program, data: CodeBlock,
                       ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder],
-                      scratch: MemoryChunk) -> Program:
+                      scratch: MemoryChunk):
         """
-        Construct a program to perform error correction.
+        Extend a Quil program to perform error correction.
         """
         if data.n != self.n:
             raise ValueError("data code word is of incorrect size")
-        if ancilla_x.n != self.n:
+        if len(ancilla_x) != self.n:
             raise ValueError("ancilla_x code word is of incorrect size")
-        if ancilla_z.n != self.n:
+        if len(ancilla_z) != self.n:
             raise ValueError("ancilla_z code word is of incorrect size")
-        if len(scratch) < (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2):
+        if len(scratch) < self.error_correct_scratch_size:
             raise ValueError("scratch buffer is too small")
 
         # Split up the scratch buffer.
         mem_x = scratch[:self.n]
         scratch_x = scratch[mem_x.end:(mem_x.end + self.r_1 + 2)]
-        mem_z = scratch[scratch_x.end:(scratch_x.end + n)]
+        mem_z = scratch[scratch_x.end:(scratch_x.end + self.n)]
         scratch_z = scratch[mem_z.end:(mem_z.end + self.r_2 + 2)]
 
         # See section 4.4 of "An Introduction to Quantum Error Correction and Fault-Tolerant Quantum
@@ -307,10 +331,10 @@ class CSSCode(object):
         prog = Program()
 
         # Propagate X errors from data block to ancilla_x block, then measure in the Z basis.
-        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_x.qubits)
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_x)
 
         # Propagate Z errors from data block to ancilla_z block, then measure in the X basis.
-        prog += apply_transversally(gates.CNOT, ancilla_z.qubits, data.qubits)
+        prog += apply_transversally(gates.CNOT, ancilla_z, data.qubits)
         prog += apply_transversally(gates.H, ancilla_z)
 
         # Perform measurements.
@@ -323,26 +347,12 @@ class CSSCode(object):
         z_error = quil_classical_correct(prog, mem_z, data.z_errors, scratch_z,
                                          self.parity_check_c2, self._c2_syndromes)
 
-        return prog
-
-
-class CodeBlock(object):
-    """
-    CodeBlock keeps track of a collection of physical qubits encoding a logical qubit using a
-    stabiliser code along with the known errors. Each time an error correction is performed, the
-    count of known errors may be updated.
-    """
-    def __init__(qubits: List[QubitPlaceholder], x_errors: MemoryChunk, z_errors: MemoryChunk):
-        n = len(qubits)
-        if len(x_errors) != n:
-            raise ValueError("x_errors is of incorrect size")
-        if len(z_errors) != n:
-            raise ValueError("z_errors is of incorrect size")
-
-        self.n = len(qubits)
-        self.qubits = qubits
-        self.x_errors = x_errors
-        self.z_errors = z_errors
+    @property
+    def error_correct_scratch_size(self) -> int:
+        """
+        Returns the minimum size of the scratch buffer required by error_correct.
+        """
+        return (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2)
 
 
 def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryChunk,
@@ -377,7 +387,7 @@ def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryC
 
         matches = scratch[1:2]
         quil_classical.string_match(prog, syndrome, match_syndrome, matches, scratch[:1])
-        quil_classical.conditional_add(prog, errors, correction, matches, scratch[:1])
+        quil_classical.conditional_xor(prog, errors, correction, matches, scratch[:1])
 
 def syndrome_table(parity_check):
     """
