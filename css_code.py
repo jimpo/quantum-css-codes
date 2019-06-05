@@ -1,13 +1,14 @@
 import itertools
 import numpy as np
 from pyquil import Program
-from pyquil.quilbase import Gate
 import pyquil.gates as gates
 from pyquil.paulis import PauliTerm, ID, sX, sY, sZ
 from pyquil.quilatom import Qubit, QubitPlaceholder
+from pyquil.quilbase import Gate
 from typing import List, Union
 
 from errors import InvalidCodeError
+import operations
 
 
 class CSSCode(object):
@@ -56,6 +57,7 @@ class CSSCode(object):
         t_1, self._c1_syndromes = syndrome_table(h_1)
         t_2, self._c2_syndromes = syndrome_table(h_2)
         self.t = min(t_1, t_2)
+        self._transversal_gates = self._determine_transversal_gates(h_1, h_2)
 
     def stabilisers(self) -> List[PauliTerm]:
         zeros = np.zeros(self.n, dtype='int')
@@ -71,11 +73,14 @@ class CSSCode(object):
 
     def z_operators(self) -> List[PauliTerm]:
         """
-        [transpose(A_2) 0 I]
+        Returns the logical Z operators chosen for this CSS code.
+
+        See Nielsen & Chuang section 10.5.7 for the method of choosing operators.
         """
         n, r_1, r_2 = self.n, self.r_1, self.r_2
         s = n - r_1 - r_2
 
+        # Use the row vector [ 0 0 0 | A2^T 0 I ], which commutes with the check matrix.
         check_mat = np.zeros((s, 2 * n), dtype='int')
         check_mat[:, n:(n + r_1)] = np.transpose(self.parity_check_c1[:, (r_1 + r_2):n])
         check_mat[:, (n + r_1 + r_2):(2 * n)] = np.identity(s)
@@ -85,7 +90,51 @@ class CSSCode(object):
         ]
 
     def x_operators(self) -> List[PauliTerm]:
-        pass
+        """
+        Returns the logical X operators chosen for this CSS code.
+
+        See Nielsen & Chuang section 10.5.7 for the method of choosing operators.
+        """
+        n, r_1, r_2 = self.n, self.r_1, self.r_2
+        s = n - r_1 - r_2
+
+        # Use the row vector [ 0 E^T I | 0 0 0 ], which commutes with the check matrix.
+        check_mat = np.zeros((s, 2 * n), dtype='int')
+        check_mat[:, r_1:(r_1 + r_2)] = np.transpose(self.parity_check_c2[:, (r_1 + r_2):n])
+        check_mat[:, (r_1 + r_2):n] = np.identity(s)
+        return [
+            pauli_term_for_row(check_mat[i, :n], check_mat[i, n:])
+            for i in range(s)
+        ]
+
+    def is_transversal(self, gate_name: str) -> bool:
+        """
+        Determines whether a quantum gates is known to be fault tolerant with transversal
+        application. Transversal application is when the logical gate can by implemented by
+        application of the physical gate to each individual qubit.
+        """
+        return gate_name in self._transversal_gates
+
+    def _determine_transversal_gates(self, parity_check_c1, parity_check_c2):
+        # See "Efficient fault-tolerant quantum computing" by Andrew M. Steane for rationales.
+        gates = []
+
+        # The identity is clearly transversal.
+        gates.append('I')
+
+        # CNOT is always transversal for CSS codes. (Lemma 2, Steane 1998)
+        gates.append('CNOT')
+
+        # If C_1 = C_2, then H and CZ are transversal. (Lemma 3, Steane 1998)
+        if codes_equal(parity_check_c1, parity_check_c2):
+            gates.append('H')
+            gates.append('CZ')
+
+            # If C_1 = C_2 and is doubly even, then P transversal. (Lemma 3, Steane 1998)
+            if is_doubly_even(parity_check_c1):
+                gates.append('PHASE')
+
+        return frozenset(gates)
 
     def encode(self, qubits: List[Union[QubitPlaceholder, int]]) -> Program:
         n, r_1, r_2 = self.n, self.r_1, self.r_2
@@ -143,6 +192,10 @@ class CSSCode(object):
 
         return prog
 
+
+def measure(css: CSSCode, data: List[QubitPlaceholder],
+            ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder]) -> Program:
+    pass
 
 def syndrome_table(parity_check):
     """
@@ -293,3 +346,45 @@ def normalize_parity_check(h, offset):
                 h[j, :] += h[i, :]
 
     return np.mod(h, 2), qubit_swaps
+
+def codes_equal(parity_check_1, parity_check_2) -> bool:
+    if parity_check_1.shape != parity_check_2.shape:
+        return False
+    return np.array_equal(
+        reduced_row_echelon_form(parity_check_1),
+        reduced_row_echelon_form(parity_check_2)
+    )
+
+def reduced_row_echelon_form(mat):
+    """
+    Returns a new copy of a binary matrix in reduced row echelon form.
+    """
+    mat = np.copy(mat)
+    m, n = mat.shape
+
+    r = 0
+    for c in range(n):
+        # Find a row after the first r with a 1 in the c'th column.
+        row = next((i for i in range(r, m) if mat[i, c] % 2 == 1), None)
+        if row is None:
+            continue
+
+        # Ensure row r has a 1 in the c'th column.
+        if mat[r, c] % 2 == 0:
+            mat[r, :] += mat[row, :]
+
+        # Ensure all other rows have a 0 in the i'th column.
+        for i in range(m):
+            if i != r and mat[i, c] % 2 == 1:
+                mat[i, :] += mat[r, :]
+
+        # Move onto the next row.
+        r += 1
+
+    return np.mod(mat, 2)
+
+def is_doubly_even(mat):
+    """
+    Returns whether even row in the parity check matrix of a binary code is a multiple of 4.
+    """
+    return not np.any(np.mod(np.sum(mat, axis=1), 4))

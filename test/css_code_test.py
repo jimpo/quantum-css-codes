@@ -19,6 +19,10 @@ class TestCSSCode(unittest.TestCase):
         self.check_normalized(self.steane_7bit.parity_check_c1, 0)
         self.check_normalized(self.steane_7bit.parity_check_c2, 3)
 
+    def test_transversal_gates(self):
+        for gate in ('I', 'CNOT', 'H', 'CZ', 'PHASE'):
+            self.assertTrue(self.steane_7bit.is_transversal(gate))
+
     def check_normalized(self, parity_check, offset):
         r, n = parity_check.shape
         self.assertTrue(np.array_equal(parity_check[:, offset:offset+r], np.identity(r)))
@@ -42,9 +46,9 @@ class TestCSSCode(unittest.TestCase):
 
     def test_x_operators(self):
         expected = [
-            sZ(1) * sZ(2) * sZ(6),
+            sX(3) * sX(4) * sX(6),
         ]
-        self.assertEqual(self.steane_7bit.z_operators(), expected)
+        self.assertEqual(self.steane_7bit.x_operators(), expected)
 
     def test_encode(self):
         n = 7
@@ -76,3 +80,28 @@ class TestCSSCode(unittest.TestCase):
             syndrome = np.mod(np.matmul(h, e), 2)
             computed_s = css_code.vec_to_int(syndrome)
             self.assertEqual(s, computed_s)
+
+    def test_is_doubly_even(self):
+        mat = np.array([
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 1, 0, 1, 1, 0],
+            [1, 1, 1, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+        ], dtype='int')
+        self.assertTrue(css_code.is_doubly_even(mat))
+
+        mat = np.array([
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 1, 0, 1, 1, 0],
+            [0, 1, 1, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+        ], dtype='int')
+        self.assertFalse(css_code.is_doubly_even(mat))
+
+        mat = np.array([
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 1, 1, 0, 1, 1, 0],
+            [1, 1, 1, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+        ], dtype='int')
+        self.assertFalse(css_code.is_doubly_even(mat))
