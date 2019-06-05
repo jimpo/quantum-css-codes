@@ -8,7 +8,7 @@ from pyquil.quilbase import Gate
 from typing import List, Union
 
 from errors import InvalidCodeError
-
+from memory import MemoryChunk
 
 class CSSCode(object):
     """
@@ -278,9 +278,154 @@ class CSSCode(object):
     def apply_universal(self, gate_name, *blocks: List[QubitPlaceholder]):
         pass
 
-def measure(css: CSSCode, data: List[QubitPlaceholder],
-            ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder]) -> Program:
-    pass
+    def error_correct(self, data: CodeBlock,
+                      ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder],
+                      scratch: MemoryChunk) -> Program:
+        """
+        Construct a program to perform error correction.
+        """
+        if data.n != self.n:
+            raise ValueError("data code word is of incorrect size")
+        if ancilla_x.n != self.n:
+            raise ValueError("ancilla_x code word is of incorrect size")
+        if ancilla_z.n != self.n:
+            raise ValueError("ancilla_z code word is of incorrect size")
+        if len(scratch) < (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2):
+            raise ValueError("scratch buffer is too small")
+
+        # Split up the scratch buffer.
+        mem_x = scratch[:self.n]
+        scratch_x = scratch[mem_x.end:(mem_x.end + self.r_1 + 2)]
+        mem_z = scratch[scratch_x.end:(scratch_x.end + n)]
+        scratch_z = scratch[mem_z.end:(mem_z.end + self.r_2 + 2)]
+
+        # See section 4.4 of "An Introduction to Quantum Error Correction and Fault-Tolerant Quantum
+        # Computation" by Daniel Gottesman for correction circuit.
+        prog = Program()
+
+        # Propagate X errors from data block to ancilla_x block, then measure in the Z basis.
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_x.qubits)
+
+        # Propagate Z errors from data block to ancilla_z block, then measure in the X basis.
+        prog += apply_transversally(gates.CNOT, ancilla_z.qubits, data.qubits)
+        prog += apply_transversally(gates.H, ancilla_z)
+
+        # Perform measurements.
+        prog += (gates.MEASURE(ancilla_x[i], mem_x[i]) for i in range(self.n))
+        prog += (gates.MEASURE(ancilla_z[i], mem_z[i]) for i in range(self.n))
+
+        # Correct the measured classical codewords.
+        x_error = quil_classical_correct(prog, mem_x, data.x_errors, scratch_x,
+                                         self.parity_check_c1, self._c1_syndromes)
+        z_error = quil_classical_correct(prog, mem_z, data.z_errors, scratch_z,
+                                         self.parity_check_c2, self._c2_syndromes)
+
+        return prog
+
+
+class CodeBlock(object):
+    """
+    CodeBlock keeps track of a collection of physical qubits encoding a logical qubit using a
+    stabiliser code along with the known errors. Each time an error correction is performed, the
+    count of known errors may be updated.
+    """
+    def __init__(qubits: List[QubitPlaceholder], x_errors: MemoryChunk, z_errors: MemoryChunk):
+        n = len(qubits)
+        if len(x_errors) != n:
+            raise ValueError("x_errors is of incorrect size")
+        if len(z_errors) != n:
+            raise ValueError("z_errors is of incorrect size")
+
+        self.n = len(qubits)
+        self.qubits = qubits
+        self.x_errors = x_errors
+        self.z_errors = z_errors
+
+
+def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryChunk,
+                           scratch: MemoryChunk, parity_check, syndromes):
+    """
+    Extend a Quil program with instructions to correct a noisy classical codeword. Given a noisy
+    codeword and a vector of known existing errors, this attempts to identify the valid codeword
+    it decodes to. If such a correction is possible, this program updates the error vector with the
+    additional corrections required. If no such correction is possible because the number of errors
+    exceeds the unique decoding threshold, the errors vector is left unchanged.
+    """
+    m, n = parity_check.shape
+    if len(codeword) != n:
+        raise ValueError("codeword is of incorrect size")
+    if len(errors) != n:
+        raise ValueError("errors is of incorrect size")
+    if len(scratch) < m + 2:
+        raise ValueError("scratch buffer is too small")
+
+    prog = Program()
+
+    # Add in existing known errors to the noisy codeword.
+    prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
+
+    # Compute the syndrome by multiplying by the parity check matrix.
+    syndrome = scratch[2:m+2]
+    quil_matmul(prog, parity_check, codeword, syndrome, scratch[:2])
+
+    # Find the matching syndrome in the syndrome table and apply the correction.
+    for match_syndrome_key, correction in syndromes.items():
+        match_syndrome = int_to_vec(match_syndrome_key, m)
+
+        matches = scratch[1:2]
+        quil_string_match(prog, syndrome, match_syndrome, matches, scratch[:1])
+        quil_conditional_add(prog, errors, correction, matches, scratch[:1])
+
+def quil_matmul(prog: Program, mat, vec: MemoryChunk, result: MemoryChunk,
+                scratch: MemoryChunk):
+    """
+    Extend a Quil program with instructions to perform a classical matrix multiplication of a fixed
+    binary matrix with a vector of bits stored in classical memory.
+    """
+    m, n = mat.shape
+    if len(vec) != n:
+        raise ValueError("mat and vec are of incompatible sizes")
+    if len(result) != n:
+        raise ValueError("mat and result are of incompatible sizes")
+    if len(scratch) < 1:
+        raise ValueError("scratch buffer is too small")
+
+    for i in range(m):
+        prog += gates.MOVE(result[i], 0)
+        for j in range(n):
+            prog += gates.MOVE(scratch, vec[j])
+            prog += gates.AND(scratch, mat[i][j])
+            prog += gates.ADD(result[i], scratch)
+
+def quil_string_match(prog: Program, mem: MemoryChunk, vec, output: MemoryChunk, scratch: MemoryChunk):
+    """
+    Compares a bit string in Quil classical memory to a constant vector. If they are equal, the
+    function assigns output to 1, otherwise 0.
+    """
+    n = len(mem)
+    if vec.size != n:
+        raise ValueError("length of mem and vec do not match")
+
+    prog += gates.MOVE(output[0], 0)
+    for i in range(n):
+        prog += gates.MOVE(scratch[0], mem[i])
+        prog += gates.XOR(scratch[0], vec[i])
+        prog += gates.IOR(output[0], scratch[0])
+    prog += gates.NOT(output[0])
+
+def quil_conditional_xor(prog: Program, mem: MemoryChunk, vec, flag: MemoryChunk, scratch: MemoryChunk):
+    """
+    Conditionally bitwise XORs a constant vector to a bit string in Quil classical memory if a
+    flag bit is set. If the flag bit is not set, this does not modify the memory.
+    """
+    n = len(mem)
+    if vec.size != n:
+        raise ValueError("length of mem and vec do not match")
+
+    for i in range(n):
+        prog += gates.MOVE(scratch[0], flag)
+        prog += gates.AND(scratch[0], vec[i])
+        prog += gates.XOR(mem[i], scratch[0])
 
 def syndrome_table(parity_check):
     """
@@ -306,11 +451,23 @@ def syndrome_table(parity_check):
 
 def vec_to_int(vec):
     """
-    Convert a vector of bits to its big-endian int representation.
+    Convert a big-endian bit vector to an integer.
     """
     result = 0
     for i in range(vec.size):
         result = (result << 1) + vec[i]
+    return result
+
+def int_to_vec(int_repr, n):
+    """
+    Convert a int to its big-endian bit vector representation.
+    """
+    vec = np.zeros(n, dtype='int')
+    for i in reversed(range(n)):
+        vec[i] = result & 1
+        result = (result >> 1)
+    if result != 0:
+        raise ValueError("n is too small")
     return result
 
 def weight_w_vectors(n, w):
