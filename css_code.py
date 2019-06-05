@@ -8,7 +8,6 @@ from pyquil.quilbase import Gate
 from typing import List, Union
 
 from errors import InvalidCodeError
-import operations
 
 
 class CSSCode(object):
@@ -119,7 +118,7 @@ class CSSCode(object):
         # See "Efficient fault-tolerant quantum computing" by Andrew M. Steane for rationales.
         gates = []
 
-        # The identity is clearly transversal.
+        # I is always transversal for stabiliser codes.
         gates.append('I')
 
         # CNOT is always transversal for CSS codes. (Lemma 2, Steane 1998)
@@ -136,7 +135,13 @@ class CSSCode(object):
 
         return frozenset(gates)
 
-    def encode(self, qubits: List[Union[QubitPlaceholder, int]]) -> Program:
+    def noisy_encode_zero(self, qubits: List[Union[QubitPlaceholder, int]]) -> Program:
+        """
+        Construct a program preparing a new logical qubit in the |0> state (+1 eigenstate of \hat Z).
+        The qubits must all be reset to the physical |0> state at the beginning of this program. The
+        preparation is not fault tolerant and any physical errors that occur during preparation may
+        create many correlated errors in the code block.
+        """
         n, r_1, r_2 = self.n, self.r_1, self.r_2
 
         # We are starting with all qubits in the |0> state, meaning they are stabilised by
@@ -179,12 +184,12 @@ class CSSCode(object):
                 if self.parity_check_c2[i - r_1, j] == 1:
                     prog += gates.CNOT(qubits[j], qubits[i])
 
-        # Step 3: Copy X's from I1 to A and B. This has the side effect of constructing D and A2T.
+        # Step 3: Copy X's from I1 to A1 and A2. This has the side effect of constructing D and A2T.
         # Post-state:
         #
-        # [[ I1 A B |   0  0  0 ],
-        #  [  0 0 0 |   D I2  E ],
-        #  [  0 0 0 | A2T  0 I3 ]]
+        # [[ I1 A1 A2 |   0  0  0 ],
+        #  [  0  0  0 |   D I2  E ],
+        #  [  0  0  0 | A2T  0 I3 ]]
         for i in range(r_1):
             for j in range(r_1, n):
                 if self.parity_check_c1[i, j] == 1:
@@ -192,6 +197,86 @@ class CSSCode(object):
 
         return prog
 
+    def noisy_encode_plus(self, qubits: List[Union[QubitPlaceholder, int]]) -> Program:
+        """
+        Construct a program preparing a new logical qubit in the |+> state (+1 eigenstate of \hat X).
+        The qubits must all be reset to the physical |0> state at the beginning of this program. The
+        preparation is not fault tolerant and any physical errors that occur during preparation may
+        create many correlated errors in the code block.
+        """
+        # See implementation of noisy_encode_zero for more detailed comments.
+        n, r_1, r_2 = self.n, self.r_1, self.r_2
+
+        # We are starting with all qubits in the |+> state, meaning they are stabilised by
+        # X_1, X_2, ..., X_n.
+        stabilisers = self.stabilisers() + self.x_operators()
+
+        # The idea is that we want to transform the parity check matrix from
+        #
+        # [[ 0 0 0 | I1  0  0 ],     [[ I1 A1 A2 | 0  0  0 ],
+        #  [ 0 0 0 | 0  I2  0 ],  =>  [  0  0  0 | D I2  E ],
+        #  [ 0 0 0 | 0   0 I3 ]]      [  0 ET I3 | 0  0  0 ]]
+
+        # The program accumulates the actual operations on the qubits.
+        prog = Program()
+
+        # Step 1: Apply Hadamards to move I1 and I3 to the X side. Post-state:
+        #
+        # [[ I1 0  0 | 0  0 0 ],
+        #  [  0 0  0 | 0 I2 0 ],
+        #  [  0 0 I3 | 0  0 0 ]]
+        for i in range(r_1):
+            prog += gates.H(qubits[i])
+        for i in range(r_1 + r_2, n):
+            prog += gates.H(qubits[i])
+
+        # Step 2: Copy Z's from I2 to E. This has the side effect of constructing ET. Post-state:
+        #
+        # [[ I1  0  0 | 0  0 0 ],
+        #  [  0  0  0 | 0 I2 E ],
+        #  [  0 ET I3 | 0  0 0 ]]
+        for i in range(r_1, r_1 + r_2):
+            for j in range(r_1 + r_2, n):
+                if self.parity_check_c2[i - r_1, j] == 1:
+                    prog += gates.CNOT(qubits[j], qubits[i])
+
+        # Step 3: Copy X's from I1 to A1 and A2. This has the side effect of constructing D.
+        # Post-state:
+        #
+        # [[ I1 A1 A2 | 0  0 0 ],
+        #  [  0  0  0 | D I2 E ],
+        #  [  0 ET I3 | 0  0 0 ]]
+        for i in range(r_1):
+            for j in range(r_1, n):
+                if self.parity_check_c1[i, j] == 1:
+                    prog += gates.CNOT(qubits[i], qubits[j])
+
+        return prog
+
+    def apply_transversal(self, gate_name: str, *blocks: List[QubitPlaceholder]) -> Program:
+        """
+        Attempt to construct a program implementing the given gate transversally. If that cannot be
+        done with this type of code, then return None.
+        """
+        if gate_name not in self.is_transversal(gate_name):
+            return None
+
+        if gate_name == 'I':
+            return apply_transversally(gates.I, *blocks)
+        if gate_name == 'CNOT':
+            return apply_transversally(gates.CNOT, *blocks)
+        if gate_name == 'H':
+            return apply_transversally(gates.H, *blocks)
+        if gate_name == 'CZ':
+            return apply_transversally(gates.CZ, *blocks)
+        if gate_name == 'PHASE':
+            return apply_transversally(
+                lambda qubit: (gates.Z(qubit), gates.PHASE(qubit)), *blocks
+            )
+        raise NotImplementedError("transversal {} not implemented".format(gate_name))
+
+    def apply_universal(self, gate_name, *blocks: List[QubitPlaceholder]):
+        pass
 
 def measure(css: CSSCode, data: List[QubitPlaceholder],
             ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder]) -> Program:
@@ -388,3 +473,6 @@ def is_doubly_even(mat):
     Returns whether even row in the parity check matrix of a binary code is a multiple of 4.
     """
     return not np.any(np.mod(np.sum(mat, axis=1), 4))
+
+def apply_transversally(gate, *blocks) -> Program:
+    return Program(gate(*qubits) for qubits in zip(*blocks))
