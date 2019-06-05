@@ -7,8 +7,11 @@ from pyquil.quilatom import Qubit, QubitPlaceholder
 from pyquil.quilbase import Gate
 from typing import List, Union
 
+import bin_matrix
+import quil_classical
 from errors import InvalidCodeError
 from memory import MemoryChunk
+
 
 class CSSCode(object):
     """
@@ -366,66 +369,15 @@ def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryC
 
     # Compute the syndrome by multiplying by the parity check matrix.
     syndrome = scratch[2:m+2]
-    quil_matmul(prog, parity_check, codeword, syndrome, scratch[:2])
+    quil_classical.matmul(prog, parity_check, codeword, syndrome, scratch[:2])
 
     # Find the matching syndrome in the syndrome table and apply the correction.
     for match_syndrome_key, correction in syndromes.items():
-        match_syndrome = int_to_vec(match_syndrome_key, m)
+        match_syndrome = bin_matrix.int_to_vec(match_syndrome_key, m)
 
         matches = scratch[1:2]
-        quil_string_match(prog, syndrome, match_syndrome, matches, scratch[:1])
-        quil_conditional_add(prog, errors, correction, matches, scratch[:1])
-
-def quil_matmul(prog: Program, mat, vec: MemoryChunk, result: MemoryChunk,
-                scratch: MemoryChunk):
-    """
-    Extend a Quil program with instructions to perform a classical matrix multiplication of a fixed
-    binary matrix with a vector of bits stored in classical memory.
-    """
-    m, n = mat.shape
-    if len(vec) != n:
-        raise ValueError("mat and vec are of incompatible sizes")
-    if len(result) != n:
-        raise ValueError("mat and result are of incompatible sizes")
-    if len(scratch) < 1:
-        raise ValueError("scratch buffer is too small")
-
-    for i in range(m):
-        prog += gates.MOVE(result[i], 0)
-        for j in range(n):
-            prog += gates.MOVE(scratch, vec[j])
-            prog += gates.AND(scratch, mat[i][j])
-            prog += gates.ADD(result[i], scratch)
-
-def quil_string_match(prog: Program, mem: MemoryChunk, vec, output: MemoryChunk, scratch: MemoryChunk):
-    """
-    Compares a bit string in Quil classical memory to a constant vector. If they are equal, the
-    function assigns output to 1, otherwise 0.
-    """
-    n = len(mem)
-    if vec.size != n:
-        raise ValueError("length of mem and vec do not match")
-
-    prog += gates.MOVE(output[0], 0)
-    for i in range(n):
-        prog += gates.MOVE(scratch[0], mem[i])
-        prog += gates.XOR(scratch[0], vec[i])
-        prog += gates.IOR(output[0], scratch[0])
-    prog += gates.NOT(output[0])
-
-def quil_conditional_xor(prog: Program, mem: MemoryChunk, vec, flag: MemoryChunk, scratch: MemoryChunk):
-    """
-    Conditionally bitwise XORs a constant vector to a bit string in Quil classical memory if a
-    flag bit is set. If the flag bit is not set, this does not modify the memory.
-    """
-    n = len(mem)
-    if vec.size != n:
-        raise ValueError("length of mem and vec do not match")
-
-    for i in range(n):
-        prog += gates.MOVE(scratch[0], flag)
-        prog += gates.AND(scratch[0], vec[i])
-        prog += gates.XOR(mem[i], scratch[0])
+        quil_classical.string_match(prog, syndrome, match_syndrome, matches, scratch[:1])
+        quil_classical.conditional_add(prog, errors, correction, matches, scratch[:1])
 
 def syndrome_table(parity_check):
     """
@@ -439,53 +391,15 @@ def syndrome_table(parity_check):
     for w in range(n + 1):
         # t_table is a table of syndromes produced by weight-t errors.
         t_table = {}
-        for e in weight_w_vectors(n, w):
+        for e in bin_matrix.weight_w_vectors(n, w):
             syndrome = np.mod(np.matmul(parity_check, e), 2)
-            syndrome_int = vec_to_int(syndrome)
+            syndrome_int = bin_matrix.vec_to_int(syndrome)
             if syndrome_int in table or syndrome_int in t_table:
                 return w - 1, table
             t_table[syndrome_int] = e
         # Merge t_table into table
         table = {**table, **t_table}
     return n, table
-
-def vec_to_int(vec):
-    """
-    Convert a big-endian bit vector to an integer.
-    """
-    result = 0
-    for i in range(vec.size):
-        result = (result << 1) + vec[i]
-    return result
-
-def int_to_vec(int_repr, n):
-    """
-    Convert a int to its big-endian bit vector representation.
-    """
-    vec = np.zeros(n, dtype='int')
-    for i in reversed(range(n)):
-        vec[i] = result & 1
-        result = (result >> 1)
-    if result != 0:
-        raise ValueError("n is too small")
-    return result
-
-def weight_w_vectors(n, w):
-    """
-    Generate a sequence of all length n binary vectors with Hamming weight w.
-    """
-    def helper(vec, w, start):
-        n = vec.size
-        if w == 0:
-            yield np.copy(vec)
-        else:
-            for i in range(start, n):
-                vec[i] = 1
-                yield from helper(vec, w - 1, i + 1)
-                vec[i] = 0
-
-    vec = np.zeros(n, dtype='int')
-    yield from helper(vec, w, 0)
 
 def transform_stabilisers(mat, prog):
     _, n = mat.shape
@@ -506,7 +420,6 @@ def transform_stabilisers(mat, prog):
             conjugate_cnot_with_check_mat(mat, *qubits)
         else:
             raise ValueError("cannot conjugate gate {}".format(inst.name))
-
 
 def conjugate_h_with_check_mat(mat, qubit):
     k, cols = mat.shape
@@ -593,37 +506,9 @@ def codes_equal(parity_check_1, parity_check_2) -> bool:
     if parity_check_1.shape != parity_check_2.shape:
         return False
     return np.array_equal(
-        reduced_row_echelon_form(parity_check_1),
-        reduced_row_echelon_form(parity_check_2)
+        bin_matrix.reduced_row_echelon_form(parity_check_1),
+        bin_matrix.reduced_row_echelon_form(parity_check_2)
     )
-
-def reduced_row_echelon_form(mat):
-    """
-    Returns a new copy of a binary matrix in reduced row echelon form.
-    """
-    mat = np.copy(mat)
-    m, n = mat.shape
-
-    r = 0
-    for c in range(n):
-        # Find a row after the first r with a 1 in the c'th column.
-        row = next((i for i in range(r, m) if mat[i, c] % 2 == 1), None)
-        if row is None:
-            continue
-
-        # Ensure row r has a 1 in the c'th column.
-        if mat[r, c] % 2 == 0:
-            mat[r, :] += mat[row, :]
-
-        # Ensure all other rows have a 0 in the i'th column.
-        for i in range(m):
-            if i != r and mat[i, c] % 2 == 1:
-                mat[i, :] += mat[r, :]
-
-        # Move onto the next row.
-        r += 1
-
-    return np.mod(mat, 2)
 
 def is_doubly_even(mat):
     """

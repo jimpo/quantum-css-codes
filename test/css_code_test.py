@@ -2,8 +2,10 @@ import numpy as np
 from pyquil.paulis import PauliTerm, ID, sX, sY, sZ
 import unittest
 
+import bin_matrix
 import css_code
 from css_code import CSSCode
+
 
 class TestCSSCode(unittest.TestCase):
     def setUp(self):
@@ -97,7 +99,7 @@ class TestCSSCode(unittest.TestCase):
 
         for s, e in table.items():
             syndrome = np.mod(np.matmul(h, e), 2)
-            computed_s = css_code.vec_to_int(syndrome)
+            computed_s = bin_matrix.vec_to_int(syndrome)
             self.assertEqual(s, computed_s)
 
     def test_is_doubly_even(self):

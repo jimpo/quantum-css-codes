@@ -1,6 +1,10 @@
 from pyquil.quilatom import MemoryReference
 
 class MemoryChunk(object):
+    """
+    A MemoryChunk represents a slice of Quil classical memory. This class wraps MemoryReference in
+    pyQuil with the ability to split up a memory reference into multiple sized chunks.
+    """
     def __init__(self, mem: MemoryReference, start: int, end: int):
         if mem.declared_size is not None and mem.declared_size < end:
             raise IndexError("bounds would exceed declared size of memory reference")
@@ -16,7 +20,7 @@ class MemoryChunk(object):
         return "<MChunk {}[{}:{}]>".format(self.mem.name, self.start, self.end)
 
     def __len__(self):
-        return self.start - self.end
+        return self.end - self.start
 
     def __getitem__(self, index):
         if isinstance(index, slice):
@@ -33,6 +37,6 @@ class MemoryChunk(object):
                 raise IndexError("out of bounds")
             return MemoryChunk(self.mem, start, end)
 
-        if index < self.start or index >= self.end:
+        if index < 0 or index >= len(self):
             raise IndexError("out of bounds")
         return self.mem[self.start + index]
