@@ -67,6 +67,13 @@ class TestCSSCode(unittest.TestCase):
             (np.zeros((n, n), dtype='int'), np.identity(n, dtype='int')),
             axis=1
         )
+        # Multiply some of the generators to make life easy
+        for i in range(3):
+            if self.steane_7bit.parity_check_c2[i, 6] == 1:
+                mat[3 + i, :] += mat[6, :]
+        mat = np.mod(mat, 2)
+
+        # Apply encoding program to the matrix.
         css_code.transform_stabilisers(mat, prog)
 
         expected_mat = np.zeros((n, 2 * n), dtype='int')
@@ -86,6 +93,8 @@ class TestCSSCode(unittest.TestCase):
             (np.zeros((n, n), dtype='int'), np.identity(n, dtype='int')),
             axis=1
         )
+
+        # Apply encoding program to the matrix.
         css_code.transform_stabilisers(mat, prog)
 
         expected_mat = np.zeros((n, 2 * n), dtype='int')

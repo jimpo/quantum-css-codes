@@ -210,28 +210,23 @@ class CSSCode(QECC):
         # The program accumulates the actual operations on the qubits.
         prog = Program()
 
-        # Step 1: Apply Hadamards to move I1 to the X side. Post-state:
-        #
-        # [[ I1 0 0 | 0  0  0 ],
-        #  [  0 0 0 | 0 I2  0 ],
-        #  [  0 0 0 | 0  0 I3 ]]
-        for i in range(r_1):
-            prog += gates.H(qubits[i])
-
-        # Step 2: Copy Z's from I2 to E. Post-state:
+        # Step 0: Copy Z's from I3 to E. Post-state:
         #
         # [[ I1 0 0 | 0  0  0 ],
         #  [  0 0 0 | 0 I2  E ],
         #  [  0 0 0 | 0  0 I3 ]]
         #
-        # TODO: This step isn't necessary as it can be achieved by an appropriate multiplication of
-        # generators. However, this would mess up the transform_stabilisers checking code.
-        for i in range(r_1, r_1 + r_2):
-            for j in range(r_1 + r_2, n):
-                if self.parity_check_c2[i - r_1, j] == 1:
-                    prog += gates.CNOT(qubits[j], qubits[i])
+        # This is just a multiplication of stabilisers and does not require any instructions.
 
-        # Step 3: Copy X's from I1 to A1 and A2. This has the side effect of constructing D and A2T.
+        # Step 1: Apply Hadamards to move I1 to the X side. Post-state:
+        #
+        # [[ I1 0 0 | 0  0  0 ],
+        #  [  0 0 0 | 0 I2  E ],
+        #  [  0 0 0 | 0  0 I3 ]]
+        for i in range(r_1):
+            prog += gates.H(qubits[i])
+
+        # Step 2: Copy X's from I1 to A1 and A2. This has the side effect of constructing D and A2T.
         # Post-state:
         #
         # [[ I1 A1 A2 |   0  0  0 ],
