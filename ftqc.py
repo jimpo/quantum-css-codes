@@ -50,20 +50,28 @@ def rewrite_program(raw_prog: Program, qecc: QECC, correction_interval: int) -> 
     new_prog = Program()
 
     logical_qubits = {
-        index: new_logical_qubit(new_prog, qecc, index)
+        index: new_logical_qubit(new_prog, qecc, "logical_qubit_{}".format(index))
         for index in raw_prog.get_qubits(indices=True)
     }
-    for block in logical_qubits.values():
-        qecc.encode_zero(new_prog, block.qubits)
 
     # Construct ancilla code blocks.
-    ancilla_x = [QubitPlaceholder() for _ in range(qecc.n)]
-    ancilla_z = [QubitPlaceholder() for _ in range(qecc.n)]
+    ancilla_x = new_logical_qubit(new_prog, qecc, "ancilla_x")
+    ancilla_z = new_logical_qubit(new_prog, qecc, "ancilla_y")
 
+    # Classical scratch BIT registers.
     scratch_size = max(qecc.n, qecc.error_correct_scratch_size)
     raw_scratch = new_prog.declare('scratch', 'BIT', scratch_size)
     scratch = MemoryChunk(raw_scratch, 0, raw_scratch.declared_size)
-    _initialize_memory(new_prog, raw_scratch, ancilla_x + ancilla_z)
+    _initialize_memory(new_prog, raw_scratch, ancilla_x.qubits + ancilla_z.qubits)
+
+    # Classical scratch INTEGER registers.
+    raw_scratch_int = new_prog.declare('scratch_int', 'INTEGER', 2)
+    scratch_int = MemoryChunk(raw_scratch_int, 0, raw_scratch_int.declared_size)
+    _initialize_memory(new_prog, raw_scratch_int, ancilla_x.qubits + ancilla_z.qubits)
+
+    # Reset all logical qubits.
+    for block in logical_qubits.values():
+        qecc.encode_zero(new_prog, block)
 
     instructions_until_correction = correction_interval
     for inst in raw_prog.instructions:
@@ -72,11 +80,8 @@ def rewrite_program(raw_prog: Program, qecc: QECC, correction_interval: int) -> 
             qecc.apply_gate(new_prog, inst.name, *gate_qubits)
             instructions_until_correction -= 1
         elif isinstance(inst, Measurement):
-            _reset_physical_qubits(new_prog, ancilla_z, scratch)
-            qecc.encode_zero(new_prog, ancilla_z)
-
             qubit = logical_qubits[_extract_qubit_index(inst.qubit)]
-            qecc.measure(new_prog, qubit, 0, inst.classical_reg, ancilla_z, scratch)
+            qecc.measure(new_prog, qubit, 0, inst.classical_reg, ancilla_z, scratch, scratch_int)
             instructions_until_correction -= 1
         elif isinstance(inst, ResetQubit):
             raise NotImplementedError("this instruction is not in the Quil spec")
@@ -91,7 +96,8 @@ def rewrite_program(raw_prog: Program, qecc: QECC, correction_interval: int) -> 
         elif isinstance(inst, Wait):
             raise NotImplementedError()
         elif isinstance(inst, Reset):
-            raise NotImplementedError()
+            for block in logical_qubits.values():
+                qecc.encode_zero(new_prog, block.qubits)
         elif isinstance(inst, Declare):
             new_prog.inst(inst)
         elif isinstance(inst, Pragma):
@@ -113,21 +119,13 @@ def rewrite_program(raw_prog: Program, qecc: QECC, correction_interval: int) -> 
 
     return quil.address_qubits(new_prog)
 
-def new_logical_qubit(prog: Program, qecc: QECC, index: int):
+def new_logical_qubit(prog: Program, qecc: QECC, name: str) -> CodeBlock:
     n = qecc.n
-    raw_mem = prog.declare("logical_qubit_{}".format(index), 'BIT', 2 * n)
+    raw_mem = prog.declare(name, 'BIT', 2 * n)
     mem = MemoryChunk(raw_mem, 0, raw_mem.declared_size)
     qubits = [QubitPlaceholder() for _ in range(n)]
     _initialize_memory(prog, raw_mem, qubits)
     return CodeBlock(qubits, mem[:n], mem[n:])
-
-def _reset_physical_qubits(prog: Program, qubits: List[QubitPlaceholder], scratch: MemoryChunk):
-    n = len(qubits)
-    assert len(scratch) >= n
-
-    for i in range(n):
-        prog += gates.MEASURE(qubits[i], scratch[i])
-        prog.if_then(scratch[i], gates.X(qubits[i]))
 
 def _gate_qubits(gate: Gate) -> List[int]:
     return [_extract_qubit_index(qubit) for qubit in gate.qubits]
@@ -138,15 +136,10 @@ def _extract_qubit_index(qubit: Union[Qubit, int]) -> int:
     return qubit
 
 def perform_error_correction(prog: Program, qecc: QECC, block: CodeBlock,
-                             ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder],
-                             scratch: MemoryChunk):
-    _reset_physical_qubits(prog, ancilla_x, scratch)
+                             ancilla_x: CodeBlock, ancilla_z: CodeBlock, scratch: MemoryChunk):
     qecc.encode_plus(prog, ancilla_x)
-
-    _reset_physical_qubits(prog, ancilla_z, scratch)
     qecc.encode_zero(prog, ancilla_z)
-
-    qecc.error_correct(prog, block, ancilla_x, ancilla_z, scratch)
+    qecc.error_correct(prog, block, ancilla_x.qubits, ancilla_z.qubits, scratch)
 
 def _initialize_memory(prog: Program, mem: MemoryReference, qubits: List[QubitPlaceholder]):
     """

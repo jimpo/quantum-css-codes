@@ -1,4 +1,6 @@
 import abc
+import pyquil.gates as gates
+from pyquil.quil import Program
 from pyquil.quilatom import QubitPlaceholder
 from typing import List
 
@@ -24,7 +26,21 @@ class CodeBlock(object):
         self.x_errors = x_errors
         self.z_errors = z_errors
 
+    def reset(self, prog: Program):
+        """
+        Reset the physical qubits to the |0>^{\otimes n} state and the errors to 0.
+        This code block must not be entangled with any other qubits in the system.
+        """
+        prog += (gates.MEASURE(self.qubits[i], self.x_errors[i]) for i in range(self.n))
+        for i in range(self.n):
+            prog.if_then(self.x_errors[i], gates.X(self.qubits[i]))
+            prog += gates.MOVE(self.x_errors[i], 0)
+            prog += gates.MOVE(self.z_errors[i], 0)
+
 class QECC(abc.ABC):
+    """
+    Abstract Quantum Error Correcting Code.
+    """
     def __init__(self):
         pass
 

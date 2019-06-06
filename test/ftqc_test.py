@@ -18,7 +18,6 @@ class TestFTQC(unittest.TestCase):
         ])
         self.steane_7bit = CSSCode(h, h)
 
-    @unittest.skip
     def test_single_x_program(self):
         raw_prog = Program()
         ro = raw_prog.declare('ro', 'BIT', 1)
@@ -32,7 +31,6 @@ class TestFTQC(unittest.TestCase):
         for result in results:
             self.assertEqual(result[0], 1)
 
-    @unittest.skip
     def test_hamamard_z_program(self):
         raw_prog = Program()
         ro = raw_prog.declare('ro', 'BIT', 1)
@@ -58,7 +56,6 @@ class TestFTQC(unittest.TestCase):
         new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=10)
 
         results = self.run_program(new_prog)
-        print(results)
         for result in results:
             self.assertEqual(result[1], 0)
 
@@ -93,7 +90,6 @@ class TestFTQC(unittest.TestCase):
         raw_prog += gates.MEASURE(0, ro[0])
         raw_prog += gates.MEASURE(1, ro[1])
 
-        print(raw_prog)
         new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
 
         results = self.run_program(new_prog)

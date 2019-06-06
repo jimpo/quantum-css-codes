@@ -176,7 +176,7 @@ class CSSCode(QECC):
 
             # If C_1 = C_2 and is doubly even, then P transversal. (Lemma 3, Steane 1998)
             if is_doubly_even(parity_check_c1):
-                gates.append('PHASE')
+                gates.append('S')
 
         return frozenset(gates)
 
@@ -291,13 +291,15 @@ class CSSCode(QECC):
 
         return prog
 
-    def encode_zero(self, prog: Program, qubits: List[Union[QubitPlaceholder, int]]):
+    def encode_zero(self, prog: Program, block: CodeBlock):
+        block.reset(prog)
         # TODO: Make fault tolerant
-        prog += self.noisy_encode_zero(qubits)
+        prog += self.noisy_encode_zero(block.qubits)
 
-    def encode_plus(self, prog: Program, qubits: List[Union[QubitPlaceholder, int]]):
+    def encode_plus(self, prog: Program, block: CodeBlock):
+        block.reset(prog)
         # TODO: Make fault tolerant
-        prog += self.noisy_encode_plus(qubits)
+        prog += self.noisy_encode_plus(block.qubits)
 
     def apply_gate(self, prog: Program, gate_name: str, *blocks: CodeBlock):
         pauli_prog = self._apply_pauli(gate_name, *blocks)
@@ -323,14 +325,17 @@ class CSSCode(QECC):
 
         operators = None
         if gate_name == 'X':
-            operator = self.x_operators()
+            operators = self.x_operators()
         if gate_name == 'Y':
-            operator = self.y_operators()
+            operators = self.y_operators()
         if gate_name == 'Z':
-            operator = self.z_operators()
+            operators = self.z_operators()
 
         if operators is None:
             return None
+
+        assert len(blocks) == 1
+        block = blocks[0]
 
         # Only one logical qubit per code block.
         pauli_term = operators[0]
@@ -355,9 +360,9 @@ class CSSCode(QECC):
             return apply_transversally(gates.H, *qubits)
         if gate_name == 'CZ':
             return apply_transversally(gates.CZ, *qubits)
-        if gate_name == 'PHASE':
+        if gate_name == 'S':
             return apply_transversally(
-                lambda qubit: (gates.Z(qubit), gates.PHASE(qubit)), *qubits
+                lambda qubit: (gates.Z(qubit), gates.S(qubit)), *qubits
             )
         raise NotImplementedError("transversal {} not implemented".format(gate_name))
 
@@ -413,12 +418,55 @@ class CSSCode(QECC):
         return (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2)
 
     def measure(self, prog: Program, data: CodeBlock, index: int, outcome: MemoryReference,
-                ancilla: List[QubitPlaceholder], scratch: MemoryChunk):
+                ancilla: CodeBlock, scratch: MemoryChunk, scratch_int: MemoryChunk):
         """
         Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
         logical |0> state.
 
         Index is the index of the logical qubit within the code block. Currently must be 0.
+
+        This measurement is made fault tolerant by repeating a noisy measurement 2t + 1 times and
+        returning a majority vote.
+        """
+        if index != 0:
+            raise ValueError("only one logical qubit per code block")
+        if data.n != self.n:
+            raise ValueError("data code word is of incorrect size")
+        if ancilla.n != self.n:
+            raise ValueError("ancilla code word is of incorrect size")
+        if len(scratch) < self.measure_scratch_size:
+            raise ValueError("scratch buffer is too small")
+        if len(scratch_int) < 1:
+            raise ValueError("scratch_int buffer is too small")
+
+        trials = 2 * self.t + 1
+
+        # Split up the scratch buffer.
+        noisy_outcomes = scratch[:trials]
+        noisy_scratch = scratch[trials:]
+
+        for i in range(trials):
+            self.noisy_measure(prog, data, index, noisy_outcomes[i], ancilla, noisy_scratch)
+
+        # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
+        # registers, do a superfluous measure here of the already trashed ancilla.
+        prog += gates.MEASURE(ancilla.qubits[0], outcome)
+
+        quil_classical.majority_vote(prog, noisy_outcomes, outcome, scratch_int)
+
+    @property
+    def measure_scratch_size(self) -> int:
+        return self.n + self.r_2 + 2 + 2 * self.t + 1
+
+    def noisy_measure(self, prog: Program, data: CodeBlock, index: int, outcome: MemoryReference,
+                      ancilla: CodeBlock, scratch: MemoryChunk):
+        """
+        Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
+        logical |0> state.
+
+        Index is the index of the logical qubit within the code block. Currently must be 0.
+
+        This measurement is not fault tolerant and may fail if any single operation fails.
         """
         n, r_2 = self.n, self.r_2
 
@@ -426,7 +474,7 @@ class CSSCode(QECC):
             raise ValueError("only one logical qubit per code block")
         if data.n != n:
             raise ValueError("data code word is of incorrect size")
-        if len(ancilla) != n:
+        if ancilla.n != n:
             raise ValueError("ancilla code word is of incorrect size")
         if len(scratch) < n + r_2 + 2:
             raise ValueError("scratch buffer is too small")
@@ -435,21 +483,20 @@ class CSSCode(QECC):
         mem = scratch[:n]
         scratch = scratch[n:(n + r_2 + 2)]
 
+        # Reset the ancilla to |0>.
+        self.encode_zero(prog, ancilla)
+
         # Propagate each Z in the operator from data block to ancilla block for each, then measure
         # in the Z basis.
         #
         # This implements the technique from section 3 of
         # "Efficient fault-tolerant quantum computing" by Andrew M. Steane.
-        prog += apply_transversally(gates.CNOT, data.qubits, ancilla)
-        prog += (gates.MEASURE(ancilla[i], mem[i]) for i in range(self.n))
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla.qubits)
+        prog += (gates.MEASURE(ancilla.qubits[i], mem[i]) for i in range(self.n))
 
         # Opportunistically correct any X errors.
         quil_classical_correct(prog, mem, data.x_errors, scratch,
                                self.parity_check_c2, self._c2_syndromes)
-
-        # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
-        # registers, do a superfluous measure here of the already trashed ancilla.
-        prog += gates.MEASURE(ancilla[0], outcome)
 
         # Finally, compute the measurement outcome.
         z_operator = self.z_operator_matrix()[index:(index + 1), :]

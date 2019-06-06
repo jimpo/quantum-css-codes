@@ -48,6 +48,10 @@ class MemoryChunk(object):
             raise IndexError("out of bounds")
         return self.mem[self.start + index]
 
+    def __iter__(self):
+        for index in range(self.start, self.end):
+            yield self.mem[index]
+
 
 def matmul(prog: Program, mat, vec: MemoryChunk, result: MemoryChunk,
            scratch: MemoryChunk):
@@ -102,3 +106,18 @@ def conditional_xor(prog: Program, mem: MemoryChunk, vec, flag: MemoryChunk, scr
         prog += gates.AND(scratch[0], int(vec[i]))
         prog += gates.XOR(mem[i], scratch[0])
 
+def majority_vote(prog: Program, inputs: MemoryChunk, output: MemoryReference,
+                  scratch_int: MemoryChunk):
+    if len(scratch_int) < 2:
+        raise ValueError("scratch_int buffer too small")
+    if len(inputs) % 2 == 0:
+        raise ValueError("inputs length must be odd")
+
+    prog += gates.MOVE(scratch_int[0], 0)
+    for bit in inputs:
+        prog += gates.CONVERT(scratch_int[1], bit)
+        prog += gates.ADD(scratch_int[0], scratch_int[1])
+
+    threshold = (len(inputs) + 1) // 2
+    prog += gates.MOVE(scratch_int[1], threshold)
+    prog += gates.GE(output, scratch_int[0], scratch_int[1])

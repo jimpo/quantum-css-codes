@@ -9,15 +9,19 @@ import quil_classical
 from quil_classical import MemoryChunk
 
 class TestQuilClassical(unittest.TestCase):
+    def setUp(self):
+        self.qvm = pyquil.get_qc("1q-qvm")
+
     def test_matmul(self):
         m, n = 20, 10
         mat = np.random.randint(0, 2, size=(m, n), dtype='int')
         vec = np.random.randint(0, 2, size=n, dtype='int')
 
         prog = Program()
-        mem = self.initialize_memory(prog, n + m + 1)
+        raw_mem = prog.declare('ro', 'BIT', n + m + 1)
+        self.initialize_memory(prog, raw_mem)
 
-        mem = MemoryChunk(mem, 0, n + m + 1)
+        mem = MemoryChunk(raw_mem, 0, n + m + 1)
         vec_in = mem[0:n]
         vec_out = mem[n:(n + m)]
         scratch = mem[(n + m):(n + m + 1)]
@@ -28,8 +32,7 @@ class TestQuilClassical(unittest.TestCase):
 
         quil_classical.matmul(prog, mat, vec_in, vec_out, scratch)
 
-        qvm = pyquil.get_qc("1q-qvm")
-        results = qvm.run(prog)[0]
+        results = self.qvm.run(prog)[0]
 
         actual = results[n:(n+m)]
         expected = np.mod(np.matmul(mat, vec), 2)
@@ -46,13 +49,13 @@ class TestQuilClassical(unittest.TestCase):
             ([0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, 1], False),
         ]
 
-        qvm = pyquil.get_qc("1q-qvm")
         for vec1, vec2, expected_match in test_cases:
             n = len(vec1)
             prog = Program()
-            mem = self.initialize_memory(prog, n + 2)
+            raw_mem = prog.declare('ro', 'BIT', n + 2)
+            self.initialize_memory(prog, raw_mem)
 
-            mem = MemoryChunk(mem, 0, n + 2)
+            mem = MemoryChunk(raw_mem, 0, n + 2)
             vec = mem[0:n]
             output = mem[n:(n + 1)]
             scratch = mem[(n + 1):(n + 2)]
@@ -64,18 +67,50 @@ class TestQuilClassical(unittest.TestCase):
             match_vec = np.array(vec1, dtype='int')
             quil_classical.string_match(prog, vec, match_vec, output, scratch)
 
-            results = qvm.run(prog)[0]
+            results = self.qvm.run(prog)[0]
             self.assertEqual(results[n] == 1, expected_match)
 
-    def initialize_memory(self, prog, size):
-        mem = prog.declare('ro', 'BIT', size)
+    def test_majority_vote(self):
+        test_cases = [
+            ([0, 0, 0], 0),
+            ([0, 0, 1], 0),
+            ([0, 1, 0], 0),
+            ([1, 0, 0], 0),
+            ([0, 1, 1], 1),
+            ([1, 0, 1], 1),
+            ([1, 1, 0], 1),
+            ([1, 1, 1], 1),
+            ([0, 1, 0, 1, 0], 0),
+            ([1, 0, 1, 0, 1], 1),
+        ]
 
+        for inputs, expected_output in test_cases:
+            prog = Program()
+            raw_mem = prog.declare('ro', 'BIT', len(inputs) + 1)
+            raw_scratch_int = prog.declare('scratch_int', 'INTEGER', 2)
+            self.initialize_memory(prog, raw_mem)
+            self.initialize_memory(prog, raw_scratch_int)
+
+            mem = MemoryChunk(raw_mem, 0, raw_mem.declared_size)
+            output_mem = mem[0]
+            inputs_mem = mem[1:]
+
+            scratch_int = MemoryChunk(raw_scratch_int, 0, raw_scratch_int.declared_size)
+
+            # Copy data from inputs into mem.
+            prog += (gates.MOVE(inputs_mem[i], inputs[i]) for i in range(len(inputs)))
+
+            quil_classical.majority_vote(prog, inputs_mem, output_mem, scratch_int)
+
+            results = self.qvm.run(prog)[0]
+            self.assertEqual(results[0], expected_output)
+
+    def initialize_memory(self, prog, mem):
         # Need to measure a qubit to initialize memory for some reason.
-        for i in range(size):
+        for i in range(mem.declared_size):
             prog += gates.MEASURE(0, mem[i])
             prog += gates.MOVE(mem[i], 0)
 
-        return mem
 
 class TestMemoryChunk(unittest.TestCase):
     def setUp(self):
