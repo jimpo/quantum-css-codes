@@ -11,7 +11,7 @@ import bin_matrix
 from qecc import CodeBlock, QECC
 import quil_classical
 from quil_classical import MemoryChunk
-from errors import InvalidCodeError
+from errors import InvalidCodeError, UnsupportedGateError
 
 
 class CSSCode(QECC):
@@ -63,6 +63,9 @@ class CSSCode(QECC):
         self._t = min(t_1, t_2)
         self._transversal_gates = self._determine_transversal_gates(h_1, h_2)
 
+        if self.k != 1:
+            raise InvalidCodeError("currently only supports CSS codes for a single logical qubit")
+
     @property
     def n(self):
         return self._n
@@ -89,39 +92,53 @@ class CSSCode(QECC):
 
     def z_operators(self) -> List[PauliTerm]:
         """
-        Returns the logical Z operators chosen for this CSS code.
+        Returns the logical Z operators chosen for this CSS code as Pauli terms.
+        """
+        z_matrix = self.z_operator_matrix()
+        zeros = np.zeros_like(z_matrix, dtype='int')
+        return [
+            pauli_term_for_row(zeros[i, :], z_matrix[i, :])
+            for i in range(self.k)
+        ]
+
+    def z_operator_matrix(self):
+        """
+        Returns a check matrix for the logical Z operators chosen for this CSS code.
 
         See Nielsen & Chuang section 10.5.7 for the method of choosing operators.
         """
-        n, r_1, r_2 = self.n, self.r_1, self.r_2
-        s = n - r_1 - r_2
+        n, r_1, r_2, k = self.n, self.r_1, self.r_2, self.k
 
-        # Use the row vector [ 0 0 0 | A2^T 0 I ], which commutes with the check matrix.
-        check_mat = np.zeros((s, 2 * n), dtype='int')
-        check_mat[:, n:(n + r_1)] = np.transpose(self.parity_check_c1[:, (r_1 + r_2):n])
-        check_mat[:, (n + r_1 + r_2):(2 * n)] = np.identity(s)
-        return [
-            pauli_term_for_row(check_mat[i, :n], check_mat[i, n:])
-            for i in range(s)
-        ]
+        # Use the row vector [ A2^T 0 I ], which commutes with the check matrix.
+        check_mat = np.zeros((k, n), dtype='int')
+        check_mat[:, 0:r_1] = np.transpose(self.parity_check_c1[:, (r_1 + r_2):n])
+        check_mat[:, (r_1 + r_2):n] = np.identity(k)
+        return check_mat
 
     def x_operators(self) -> List[PauliTerm]:
         """
-        Returns the logical X operators chosen for this CSS code.
+        Returns the logical X operators chosen for this CSS code as Pauli terms.
+        """
+        x_matrix = self.x_operator_matrix()
+        zeros = np.zeros_like(x_matrix, dtype='int')
+        return [
+            pauli_term_for_row(x_matrix[i, :], zeros[i, :])
+            for i in range(self.k)
+        ]
+
+    def x_operator_matrix(self):
+        """
+        Returns a check matrix for the logical X operators chosen for this CSS code.
 
         See Nielsen & Chuang section 10.5.7 for the method of choosing operators.
         """
-        n, r_1, r_2 = self.n, self.r_1, self.r_2
-        s = n - r_1 - r_2
+        n, r_1, r_2, k = self.n, self.r_1, self.r_2, self.k
 
         # Use the row vector [ 0 E^T I | 0 0 0 ], which commutes with the check matrix.
-        check_mat = np.zeros((s, 2 * n), dtype='int')
+        check_mat = np.zeros((k, n), dtype='int')
         check_mat[:, r_1:(r_1 + r_2)] = np.transpose(self.parity_check_c2[:, (r_1 + r_2):n])
-        check_mat[:, (r_1 + r_2):n] = np.identity(s)
-        return [
-            pauli_term_for_row(check_mat[i, :n], check_mat[i, n:])
-            for i in range(s)
-        ]
+        check_mat[:, (r_1 + r_2):n] = np.identity(k)
+        return check_mat
 
     def is_transversal(self, gate_name: str) -> bool:
         """
@@ -168,8 +185,7 @@ class CSSCode(QECC):
         # gate operations to transform the stabiliser set. For details see Nielsen & Chuang
         # section 10.5.2 and Problem 10.3. Also, see Appendix A of "Fault-tolerant Preparation of
         # Stabilizer States for Quantum CSS Codes by ClassicalError-Correcting Codes."
-        stabilisers = self.stabilisers() + self.z_operators()
-
+        #
         # The idea is that we want to transform the parity check matrix from
         #
         # [[ 0 0 0 | I1  0  0 ],     [[ I1 A1 A2 | 0    0  0 ],
@@ -196,6 +212,9 @@ class CSSCode(QECC):
         # [[ I1 0 0 | 0  0  0 ],
         #  [  0 0 0 | 0 I2  E ],
         #  [  0 0 0 | 0  0 I3 ]]
+        #
+        # TODO: This step isn't necessary as it can be achieved by an appropriate multiplication of
+        # generators. However, this would mess up the transform_stabilisers checking code.
         for i in range(r_1, r_1 + r_2):
             for j in range(r_1 + r_2, n):
                 if self.parity_check_c2[i - r_1, j] == 1:
@@ -223,10 +242,6 @@ class CSSCode(QECC):
         """
         # See implementation of noisy_encode_zero for more detailed comments.
         n, r_1, r_2 = self.n, self.r_1, self.r_2
-
-        # We are starting with all qubits in the |+> state, meaning they are stabilised by
-        # X_1, X_2, ..., X_n.
-        stabilisers = self.stabilisers() + self.x_operators()
 
         # The idea is that we want to transform the parity check matrix from
         #
@@ -278,7 +293,38 @@ class CSSCode(QECC):
         # TODO: Make fault tolerant
         prog += self.noisy_encode_plus(qubits)
 
-    def apply_transversal(self, gate_name: str, *blocks: CodeBlock) -> Program:
+    def apply_gate(self, prog: Program, gate_name: str, *blocks: CodeBlock):
+        pauli_prog = self._apply_pauli(gate_name, *blocks)
+        if pauli_prog is not None:
+            prog += pauli_prog
+            return
+
+        transversal_prog = self._apply_transversal(gate_name, *blocks)
+        if transversal_prog is not None:
+            prog += transversal_prog
+            return
+
+        universal_prog = self._apply_universal(gate_name, *blocks)
+        if universal_prog is not None:
+            prog += universal_prog
+            return
+
+        raise UnsupportedGateError("logical gate {} not implemented".format(gate_name))
+
+    def _apply_pauli(self, gate_name: str, block: CodeBlock) -> Program:
+        if gate_name == 'I':
+            return Program()
+        if gate_name == 'X':
+            return apply_pauli_term(self.x_operators()[0], block)
+        if gate_name == 'Z':
+            return apply_pauli_term(self.z_operators()[0], block)
+
+        # The Y gate is not implemented natively and must be either composed from X and
+        # transversal PHASE or by universal application. Note that Y = SZXS.
+
+        return None
+
+    def _apply_transversal(self, gate_name: str, *blocks: CodeBlock) -> Program:
         """
         Attempt to construct a program implementing the given gate transversally. If that cannot be
         done with this type of code, then return None.
@@ -302,8 +348,8 @@ class CSSCode(QECC):
             )
         raise NotImplementedError("transversal {} not implemented".format(gate_name))
 
-    def apply_universal(self, gate_name, *blocks: List[QubitPlaceholder]):
-        pass
+    def _apply_universal(self, gate_name, *blocks: List[QubitPlaceholder]) -> Program:
+        return None
 
     def error_correct(self, prog: Program, data: CodeBlock,
                       ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder],
@@ -328,7 +374,6 @@ class CSSCode(QECC):
 
         # See section 4.4 of "An Introduction to Quantum Error Correction and Fault-Tolerant Quantum
         # Computation" by Daniel Gottesman for correction circuit.
-        prog = Program()
 
         # Propagate X errors from data block to ancilla_x block, then measure in the Z basis.
         prog += apply_transversally(gates.CNOT, data.qubits, ancilla_x)
@@ -342,10 +387,10 @@ class CSSCode(QECC):
         prog += (gates.MEASURE(ancilla_z[i], mem_z[i]) for i in range(self.n))
 
         # Correct the measured classical codewords.
-        x_error = quil_classical_correct(prog, mem_x, data.x_errors, scratch_x,
-                                         self.parity_check_c1, self._c1_syndromes)
-        z_error = quil_classical_correct(prog, mem_z, data.z_errors, scratch_z,
-                                         self.parity_check_c2, self._c2_syndromes)
+        quil_classical_correct(prog, mem_x, data.x_errors, scratch_x,
+                               self.parity_check_c1, self._c1_syndromes)
+        quil_classical_correct(prog, mem_z, data.z_errors, scratch_z,
+                               self.parity_check_c2, self._c2_syndromes)
 
     @property
     def error_correct_scratch_size(self) -> int:
@@ -353,6 +398,46 @@ class CSSCode(QECC):
         Returns the minimum size of the scratch buffer required by error_correct.
         """
         return (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2)
+
+    def measure(self, prog: Program, data: CodeBlock, outcome: MemoryChunk,
+                ancilla: List[QubitPlaceholder], scratch: MemoryChunk):
+        """
+        Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
+        logical |0> state.
+        """
+        n, r_2, k = self.n, self.r_2, self.k
+
+        if data.n != n:
+            raise ValueError("data code word is of incorrect size")
+        if len(ancilla) != n:
+            raise ValueError("ancilla code word is of incorrect size")
+        if len(outcome) < k:
+            raise ValueError("outcome length is too small")
+        if len(scratch) < n + r_2 + 2:
+            raise ValueError("scratch buffer is too small")
+
+        # Split up the scratch buffer.
+        mem = scratch[:n]
+        scratch = scratch[n:(n + r_2 + 2)]
+
+        # Propagate each Z in the operator from data block to ancilla block for each, then measure
+        # in the Z basis.
+        #
+        # This implements the technique from section 3 of
+        # "Efficient fault-tolerant quantum computing" by Andrew M. Steane.
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla)
+        prog += (gates.MEASURE(ancilla[i], mem[i]) for i in range(self.n))
+
+        # Opportunistically correct any X errors.
+        quil_classical_correct(prog, mem, data.x_errors, scratch,
+                               self.parity_check_c2, self._c2_syndromes)
+
+        # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
+        # registers, do a superfluous measure here of the already trashed ancilla.
+        prog += (gates.MEASURE(ancilla[i % len(ancilla)], outcome[i]) for i in range(len(outcome)))
+
+        # Finally, compute the measurement outcome.
+        quil_classical.matmul(prog, self.z_operator_matrix(), mem, outcome, scratch)
 
 
 def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryChunk,
@@ -372,14 +457,15 @@ def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryC
     if len(scratch) < m + 2:
         raise ValueError("scratch buffer is too small")
 
-    prog = Program()
-
     # Add in existing known errors to the noisy codeword.
     prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
 
     # Compute the syndrome by multiplying by the parity check matrix.
     syndrome = scratch[2:m+2]
     quil_classical.matmul(prog, parity_check, codeword, syndrome, scratch[:2])
+
+    # Revert codeword back to the state without error corrections.
+    prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
 
     # Find the matching syndrome in the syndrome table and apply the correction.
     for match_syndrome_key, correction in syndromes.items():
@@ -388,6 +474,9 @@ def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryC
         matches = scratch[1:2]
         quil_classical.string_match(prog, syndrome, match_syndrome, matches, scratch[:1])
         quil_classical.conditional_xor(prog, errors, correction, matches, scratch[:1])
+
+    # Now correct codeword with updated corrections.
+    prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
 
 def syndrome_table(parity_check):
     """
@@ -528,3 +617,8 @@ def is_doubly_even(mat):
 
 def apply_transversally(gate, *blocks) -> Program:
     return Program(gate(*qubits) for qubits in zip(*blocks))
+
+def apply_pauli_term(pauli_term: PauliTerm, block: CodeBlock) -> Program:
+    if pauli_term.coefficient != 1:
+        raise ValueError("Pauli term coefficient must be 1")
+    return Program(gates.QUANTUM_GATES[pauli](block.qubits[q]) for q, pauli in pauli_term)

@@ -17,10 +17,14 @@ class MemoryChunk(object):
         self.end = end
 
     def __str__(self):
-        return "{}[{}:{}]".format(self.mem.name, self.start, self.end)
+        return "{}[{}:{}]".format(
+            self.mem.name, self.start + self.mem.offset, self.end + self.mem.offset
+        )
 
     def __repr__(self):
-        return "<MChunk {}[{}:{}]>".format(self.mem.name, self.start, self.end)
+        return "<MChunk {}[{}:{}]>".format(
+            self.mem.name, self.start + self.mem.offset, self.end + self.mem.offset
+        )
 
     def __len__(self):
         return self.end - self.start

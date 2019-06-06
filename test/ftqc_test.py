@@ -18,9 +18,15 @@ class TestFTQC(unittest.TestCase):
         ])
         self.steane_7bit = CSSCode(h, h)
 
-    def test_rewrite_program(self):
-        raw_prog = Program((gates.I(0) for _ in range(3)))
+    def test_single_x_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += (gates.I(0) for _ in range(3))
+        raw_prog += gates.X(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
         new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
 
         qvm = pyquil.get_qc("21q-qvm")
-        results = qvm.run(new_prog)
+        results = qvm.run(new_prog)[0]
+        assert results == [1]
