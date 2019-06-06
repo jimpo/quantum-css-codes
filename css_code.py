@@ -427,6 +427,9 @@ class CSSCode(QECC):
 
         This measurement is made fault tolerant by repeating a noisy measurement 2t + 1 times and
         returning a majority vote.
+
+        This yields control after each fault tolerant operation so that a round of error correction
+        may be performed globally if required.
         """
         if index != 0:
             raise ValueError("only one logical qubit per code block")
@@ -447,6 +450,7 @@ class CSSCode(QECC):
 
         for i in range(trials):
             self.noisy_measure(prog, data, index, noisy_outcomes[i], ancilla, noisy_scratch)
+            yield
 
         # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
         # registers, do a superfluous measure here of the already trashed ancilla.

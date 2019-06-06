@@ -25,7 +25,7 @@ class TestFTQC(unittest.TestCase):
         raw_prog += gates.X(0)
         raw_prog += gates.MEASURE(0, ro[0])
 
-        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
 
         results = self.run_program(new_prog)
         for result in results:
@@ -39,7 +39,7 @@ class TestFTQC(unittest.TestCase):
         raw_prog += gates.H(0)
         raw_prog += gates.MEASURE(0, ro[0])
 
-        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
 
         results = self.run_program(new_prog)
         for result in results:
@@ -53,7 +53,7 @@ class TestFTQC(unittest.TestCase):
         raw_prog.if_then(ro[0], gates.X(0), Program())
         raw_prog += gates.MEASURE(0, ro[1])
 
-        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=10)
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
 
         results = self.run_program(new_prog)
         for result in results:
@@ -90,7 +90,7 @@ class TestFTQC(unittest.TestCase):
         raw_prog += gates.MEASURE(0, ro[0])
         raw_prog += gates.MEASURE(1, ro[1])
 
-        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
 
         results = self.run_program(new_prog)
         for result in results:
