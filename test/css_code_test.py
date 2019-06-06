@@ -52,6 +52,12 @@ class TestCSSCode(unittest.TestCase):
         ]
         self.assertEqual(self.steane_7bit.x_operators(), expected)
 
+    def test_y_operators(self):
+        expected = [
+            sZ(1) * sZ(2) * sX(3) * sX(4) * sY(6),
+        ]
+        self.assertEqual(self.steane_7bit.y_operators(), expected)
+
     def test_noisy_encode_zero(self):
         n = 7
         prog = self.steane_7bit.noisy_encode_zero(range(n))

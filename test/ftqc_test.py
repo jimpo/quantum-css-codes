@@ -18,6 +18,7 @@ class TestFTQC(unittest.TestCase):
         ])
         self.steane_7bit = CSSCode(h, h)
 
+    @unittest.skip
     def test_single_x_program(self):
         raw_prog = Program()
         ro = raw_prog.declare('ro', 'BIT', 1)
@@ -27,6 +28,80 @@ class TestFTQC(unittest.TestCase):
 
         new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
 
-        qvm = pyquil.get_qc("21q-qvm")
-        results = qvm.run(new_prog)[0]
-        assert results == [1]
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    @unittest.skip
+    def test_hamamard_z_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += gates.H(0)
+        raw_prog += gates.Z(0)
+        raw_prog += gates.H(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    def test_multiple_measurements_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 2)
+        raw_prog += gates.H(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+        raw_prog.if_then(ro[0], gates.X(0), Program())
+        raw_prog += gates.MEASURE(0, ro[1])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=10)
+
+        results = self.run_program(new_prog)
+        print(results)
+        for result in results:
+            self.assertEqual(result[1], 0)
+
+    @unittest.skip("2 qubits is too slow")
+    def test_superdense_coding_program(self):
+        self.superdense_coding_program(0, 0)
+        self.superdense_coding_program(0, 1)
+        self.superdense_coding_program(1, 0)
+        self.superdense_coding_program(1, 1)
+
+    def superdense_coding_program(self, bit0: int, bit1: int):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 2)
+        # Prepare Bell pair
+        raw_prog += gates.H(0)
+        raw_prog += gates.CNOT(0, 1)
+        # Alice controls qubit 0 and Bob controls 1
+        if bit0 == 0 and bit1 == 0:
+            pass
+        if bit0 == 0 and bit1 == 1:
+            raw_prog += gates.X(0)
+        if bit0 == 1 and bit1 == 0:
+            raw_prog += gates.Z(0)
+        if bit0 == 1 and bit1 == 1:
+            raw_prog += gates.X(0)
+            raw_prog += gates.Z(0)
+        # Now Alice sends qubit 0 to Bob
+        # Bob rotates from Bell basis to standard basis
+        raw_prog += gates.CNOT(0, 1)
+        raw_prog += gates.H(0)
+        # Measure qubits into Bob's registers
+        raw_prog += gates.MEASURE(0, ro[0])
+        raw_prog += gates.MEASURE(1, ro[1])
+
+        print(raw_prog)
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit, correction_interval=1)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], bit0)
+            self.assertEqual(result[1], bit1)
+
+    def run_program(self, prog: Program):
+        n_qubits = len(prog.get_qubits())
+        qvm = pyquil.get_qc("{}q-qvm".format(n_qubits))
+        return qvm.run(prog)

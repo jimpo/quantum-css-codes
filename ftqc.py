@@ -4,7 +4,7 @@ import pyquil.gates as gates
 from pyquil.paulis import PauliTerm
 import pyquil.quil as quil
 from pyquil.quil import Program
-from pyquil.quilatom import MemoryReference, Qubit, QubitPlaceholder
+from pyquil.quilatom import Label, MemoryReference, Qubit, QubitPlaceholder
 from pyquil.quilbase import (
     Gate,
     Measurement,
@@ -76,21 +76,20 @@ def rewrite_program(raw_prog: Program, qecc: QECC, correction_interval: int) -> 
             qecc.encode_zero(new_prog, ancilla_z)
 
             qubit = logical_qubits[_extract_qubit_index(inst.qubit)]
-            outcome = MemoryChunk(inst.classical_reg, 0, 1)
-            qecc.measure(new_prog, qubit, outcome, ancilla_z, scratch)
+            qecc.measure(new_prog, qubit, 0, inst.classical_reg, ancilla_z, scratch)
             instructions_until_correction -= 1
         elif isinstance(inst, ResetQubit):
             raise NotImplementedError("this instruction is not in the Quil spec")
         elif isinstance(inst, JumpTarget):
-            pass
+            new_prog.inst(JumpTarget(_mangle_label(inst.label)))
         elif isinstance(inst, JumpConditional):
-            pass
+            new_prog.inst(type(inst)(_mangle_label(inst.target), inst.condition))
         elif isinstance(inst, Jump):
-            pass
+            new_prog.inst(Jump(_mangle_label(inst.target)))
         elif isinstance(inst, Halt):
             new_prog.append(inst)
         elif isinstance(inst, Wait):
-            pass
+            raise NotImplementedError()
         elif isinstance(inst, Reset):
             raise NotImplementedError()
         elif isinstance(inst, Declare):
@@ -157,3 +156,9 @@ def _initialize_memory(prog: Program, mem: MemoryReference, qubits: List[QubitPl
     """
     prog += (gates.MEASURE(qubits[i % len(qubits)], mem[i]) for i in range(mem.declared_size))
     prog += (gates.MOVE(mem[i], 0) for i in range(mem.declared_size))
+
+def _mangle_label(label: Label) -> Label:
+    """Mangle a label to avoid namespace collisions."""
+    if isinstance(label, Label):
+        return Label("NESTED_{}".format(label.name))
+    return label

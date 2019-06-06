@@ -3,7 +3,7 @@ import numpy as np
 import pyquil.gates as gates
 from pyquil.paulis import PauliTerm, ID, sX, sY, sZ
 from pyquil.quil import Program
-from pyquil.quilatom import Qubit, QubitPlaceholder
+from pyquil.quilatom import MemoryReference, Qubit, QubitPlaceholder
 from pyquil.quilbase import Gate
 from typing import List, Union
 
@@ -139,6 +139,17 @@ class CSSCode(QECC):
         check_mat[:, r_1:(r_1 + r_2)] = np.transpose(self.parity_check_c2[:, (r_1 + r_2):n])
         check_mat[:, (r_1 + r_2):n] = np.identity(k)
         return check_mat
+
+    def y_operators(self) -> List[PauliTerm]:
+        """
+        Returns the logical Y operators chosen for this CSS code as Pauli terms.
+        """
+        # Y = iXZ
+        y_operators = [1j * x_op * z_op
+                       for x_op, z_op in zip(self.x_operators(), self.z_operators())]
+        for y_op in y_operators:
+            assert y_op.coefficient == 1
+        return y_operators
 
     def is_transversal(self, gate_name: str) -> bool:
         """
@@ -311,18 +322,25 @@ class CSSCode(QECC):
 
         raise UnsupportedGateError("logical gate {} not implemented".format(gate_name))
 
-    def _apply_pauli(self, gate_name: str, block: CodeBlock) -> Program:
+    def _apply_pauli(self, gate_name: str, *blocks: CodeBlock) -> Program:
         if gate_name == 'I':
             return Program()
+
+        operators = None
         if gate_name == 'X':
-            return apply_pauli_term(self.x_operators()[0], block)
+            operator = self.x_operators()
+        if gate_name == 'Y':
+            operator = self.y_operators()
         if gate_name == 'Z':
-            return apply_pauli_term(self.z_operators()[0], block)
+            operator = self.z_operators()
 
-        # The Y gate is not implemented natively and must be either composed from X and
-        # transversal PHASE or by universal application. Note that Y = SZXS.
+        if operators is None:
+            return None
 
-        return None
+        # Only one logical qubit per code block.
+        pauli_term = operators[0]
+        assert pauli_term.coefficient == 1
+        return Program(gates.QUANTUM_GATES[pauli](block.qubits[q]) for q, pauli in pauli_term)
 
     def _apply_transversal(self, gate_name: str, *blocks: CodeBlock) -> Program:
         """
@@ -399,20 +417,22 @@ class CSSCode(QECC):
         """
         return (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2)
 
-    def measure(self, prog: Program, data: CodeBlock, outcome: MemoryChunk,
+    def measure(self, prog: Program, data: CodeBlock, index: int, outcome: MemoryReference,
                 ancilla: List[QubitPlaceholder], scratch: MemoryChunk):
         """
         Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
         logical |0> state.
-        """
-        n, r_2, k = self.n, self.r_2, self.k
 
+        Index is the index of the logical qubit within the code block. Currently must be 0.
+        """
+        n, r_2 = self.n, self.r_2
+
+        if index != 0:
+            raise ValueError("only one logical qubit per code block")
         if data.n != n:
             raise ValueError("data code word is of incorrect size")
         if len(ancilla) != n:
             raise ValueError("ancilla code word is of incorrect size")
-        if len(outcome) < k:
-            raise ValueError("outcome length is too small")
         if len(scratch) < n + r_2 + 2:
             raise ValueError("scratch buffer is too small")
 
@@ -434,10 +454,14 @@ class CSSCode(QECC):
 
         # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
         # registers, do a superfluous measure here of the already trashed ancilla.
-        prog += (gates.MEASURE(ancilla[i % len(ancilla)], outcome[i]) for i in range(len(outcome)))
+        prog += gates.MEASURE(ancilla[0], outcome)
 
         # Finally, compute the measurement outcome.
-        quil_classical.matmul(prog, self.z_operator_matrix(), mem, outcome, scratch)
+        z_operator = self.z_operator_matrix()[index:(index + 1), :]
+        outcome_chunk = MemoryChunk(
+            MemoryReference(outcome.name), outcome.offset, outcome.offset + 1
+        )
+        quil_classical.matmul(prog, z_operator, mem, outcome_chunk, scratch)
 
 
 def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryChunk,
@@ -617,8 +641,3 @@ def is_doubly_even(mat):
 
 def apply_transversally(gate, *blocks) -> Program:
     return Program(gate(*qubits) for qubits in zip(*blocks))
-
-def apply_pauli_term(pauli_term: PauliTerm, block: CodeBlock) -> Program:
-    if pauli_term.coefficient != 1:
-        raise ValueError("Pauli term coefficient must be 1")
-    return Program(gates.QUANTUM_GATES[pauli](block.qubits[q]) for q, pauli in pauli_term)
