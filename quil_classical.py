@@ -1,3 +1,7 @@
+"""
+Utilities for dealing with and operating on classical memory registers in Quil.
+"""
+
 from pyquil import Program
 import pyquil.gates as gates
 from pyquil.quilatom import MemoryReference

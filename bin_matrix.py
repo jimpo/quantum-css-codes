@@ -1,3 +1,7 @@
+"""
+Utilities for binary numpy matrices.
+"""
+
 import numpy as np
 
 

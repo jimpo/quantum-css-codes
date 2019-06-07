@@ -1,3 +1,7 @@
+"""
+The library for Calderbank-Steane-Shor QECCs.
+"""
+
 import itertools
 import numpy as np
 import pyquil.gates as gates

@@ -1,3 +1,7 @@
+"""
+Interfaces for general Quantum Error Correcting Codes.
+"""
+
 import abc
 import pyquil.gates as gates
 from pyquil.quil import Program

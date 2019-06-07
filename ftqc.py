@@ -1,3 +1,9 @@
+"""
+Library for running pyQuil programs in a fault-tolerant manner.
+
+The primary public function exposed is `rewrite_program`.
+"""
+
 from typing import Dict, Callable, List, Union
 
 import pyquil.gates as gates
