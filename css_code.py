@@ -20,6 +20,10 @@ class CSSCode(QECC):
     dual code of C_2 is a subspace of C_1. If C_1 is a [n, k_1, d_1] code and C_2 is a [n, k_2, d_2]
     code, then the logical Hilbert space of the CSS code has dimension k_1 + k_2 - n and minimum
     distance min(d_1, d_2).
+
+    The physical qubits of a CSS codeword are a classical codeword of C_1 when measured in the X
+    basis and a classical codeword of C_2 when measured in the Z basis. This is the opposite of the
+    usual nomenclature.
     """
     def __init__(self, parity_check_c1, parity_check_c2):
         # Validate input codes
@@ -291,15 +295,59 @@ class CSSCode(QECC):
 
         return prog
 
-    def encode_zero(self, prog: Program, block: CodeBlock):
-        block.reset(prog)
-        # TODO: Make fault tolerant
-        prog += self.noisy_encode_zero(block.qubits)
+    def encode_zero(self, prog: Program, block: CodeBlock, ancilla: CodeBlock, scratch: MemoryChunk):
+        if len(scratch) < self.error_correct_scratch_size:
+            raise ValueError("scratch buffer is too small")
 
-    def encode_plus(self, prog: Program, block: CodeBlock):
-        block.reset(prog)
-        # TODO: Make fault tolerant
-        prog += self.noisy_encode_plus(block.qubits)
+        flag = scratch[0]
+        outcome = scratch[1]
+        scratch = scratch[2:]
+
+        # To do a somewhat fault tolerant preparation, we will do a noisy preparation of the target
+        # block, then perform a Steane error correction using a noisy ancilla. Instead of actually
+        # doing an error correction though, we will just do error detection and repeat until no
+        # errors are detected. If no errors are detected, then either both the block and ancilla
+        # were clean or they both has the exact same errors, which is unlikely. This idea comes from
+        # section 4.6 of "An Introduction to Quantum Error Correction and Fault-Tolerant Quantum
+        # Computation" by Daniel Gottesman.
+        loop_prog = Program()
+        loop_prog += gates.MOVE(flag, 0)
+
+        block.reset(loop_prog)
+        loop_prog += self.noisy_encode_zero(block.qubits)
+
+        self._error_detect_x(loop_prog, block, ancilla, outcome, scratch, include_operators=True)
+        loop_prog += gates.IOR(flag, outcome)
+
+        self._error_detect_z(loop_prog, block, ancilla, outcome, scratch, include_operators=False)
+        loop_prog += gates.IOR(flag, outcome)
+
+        prog += gates.MOVE(flag, 1)
+        prog.while_do(flag, loop_prog)
+
+    def encode_plus(self, prog: Program, block: CodeBlock, ancilla: CodeBlock, scratch: MemoryChunk):
+        if len(scratch) < self.error_correct_scratch_size:
+            raise ValueError("scratch buffer is too small")
+
+        flag = scratch[0]
+        outcome = scratch[1]
+        scratch = scratch[2:]
+
+        # See encode_zero for more thorough comments.
+        loop_prog = Program()
+        loop_prog += gates.MOVE(flag, 0)
+
+        block.reset(loop_prog)
+        loop_prog += self.noisy_encode_plus(block.qubits)
+
+        self._error_detect_x(loop_prog, block, ancilla, outcome, scratch, include_operators=False)
+        loop_prog += gates.IOR(flag, outcome)
+
+        self._error_detect_z(loop_prog, block, ancilla, outcome, scratch, include_operators=True)
+        loop_prog += gates.IOR(flag, outcome)
+
+        prog += gates.MOVE(flag, 1)
+        prog.while_do(flag, loop_prog)
 
     def apply_gate(self, prog: Program, gate_name: str, *blocks: CodeBlock):
         pauli_prog = self._apply_pauli(gate_name, *blocks)
@@ -370,55 +418,114 @@ class CSSCode(QECC):
         return None
 
     def error_correct(self, prog: Program, data: CodeBlock,
-                      ancilla_x: List[QubitPlaceholder], ancilla_z: List[QubitPlaceholder],
-                      scratch: MemoryChunk):
+                      ancilla_1: CodeBlock, ancilla_2: CodeBlock, scratch: MemoryChunk):
         """
         Extend a Quil program to perform error correction.
         """
         if data.n != self.n:
             raise ValueError("data code word is of incorrect size")
-        if len(ancilla_x) != self.n:
-            raise ValueError("ancilla_x code word is of incorrect size")
-        if len(ancilla_z) != self.n:
-            raise ValueError("ancilla_z code word is of incorrect size")
+        if ancilla_1.n != self.n:
+            raise ValueError("ancilla_1 code word is of incorrect size")
+        if ancilla_2.n != self.n:
+            raise ValueError("ancilla_2 code word is of incorrect size")
         if len(scratch) < self.error_correct_scratch_size:
             raise ValueError("scratch buffer is too small")
 
         # Split up the scratch buffer.
-        mem_x = scratch[:self.n]
-        scratch_x = scratch[mem_x.end:(mem_x.end + self.r_1 + 2)]
-        mem_z = scratch[scratch_x.end:(scratch_x.end + self.n)]
-        scratch_z = scratch[mem_z.end:(mem_z.end + self.r_2 + 2)]
+        mem = scratch[:self.n]
+        correct_scratch = scratch[self.n:]
 
         # See section 4.4 of "An Introduction to Quantum Error Correction and Fault-Tolerant Quantum
         # Computation" by Daniel Gottesman for correction circuit.
 
-        # Propagate X errors from data block to ancilla_x block, then measure in the Z basis.
-        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_x)
-
-        # Propagate Z errors from data block to ancilla_z block, then measure in the X basis.
-        prog += apply_transversally(gates.CNOT, ancilla_z, data.qubits)
-        prog += apply_transversally(gates.H, ancilla_z)
-
-        # Perform measurements.
-        prog += (gates.MEASURE(ancilla_x[i], mem_x[i]) for i in range(self.n))
-        prog += (gates.MEASURE(ancilla_z[i], mem_z[i]) for i in range(self.n))
-
-        # Correct the measured classical codewords.
-        quil_classical_correct(prog, mem_x, data.x_errors, scratch_x,
-                               self.parity_check_c1, self._c1_syndromes)
-        quil_classical_correct(prog, mem_z, data.z_errors, scratch_z,
+        # Propagate X errors from data block to ancilla block, then measure in the Z basis.
+        self.encode_plus(prog, ancilla_1, ancilla_2, scratch)
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_1.qubits)
+        prog += (gates.MEASURE(ancilla_1.qubits[i], mem[i]) for i in range(self.n))
+        quil_classical_correct(prog, mem, data.x_errors, correct_scratch,
                                self.parity_check_c2, self._c2_syndromes)
+
+        # Propagate Z errors from data block to ancilla block, then measure in the X basis.
+        self.encode_zero(prog, ancilla_1, ancilla_2, scratch)
+        prog += apply_transversally(gates.CNOT, ancilla_1.qubits, data.qubits)
+        prog += apply_transversally(gates.H, ancilla_1.qubits)
+        prog += (gates.MEASURE(ancilla_1.qubits[i], mem[i]) for i in range(self.n))
+        quil_classical_correct(prog, mem, data.z_errors, correct_scratch,
+                               self.parity_check_c1, self._c1_syndromes)
+
+    def _error_detect_x(self, prog: Program, data: CodeBlock, ancilla: CodeBlock,
+                        outcome: MemoryReference, scratch: MemoryChunk, include_operators: bool):
+        """
+        Extend a Quil program to perform detection of X errors on a data block. This this uses noisy
+        preparation of the ancilla for measurement, meaning the procedure is not totally reliable.
+        """
+        if len(scratch) < (self.n + self.r_2 + 2):
+            raise ValueError("scratch buffer is too small")
+
+        # Split up the scratch buffer.
+        mem = scratch[:self.n]
+        scratch = scratch[self.n:]
+
+        # Prepare a noisy ancilla. If measuring Z operators as well, prepare in Z eigenstate,
+        # otherwise prepare in X eigenstate.
+        ancilla.reset(prog)
+        if include_operators:
+            prog += self.noisy_encode_zero(ancilla.qubits)
+        else:
+            prog += self.noisy_encode_plus(ancilla.qubits)
+
+        # Propagate X errors from data block to ancilla block, then measure in the Z basis.
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla.qubits)
+        prog += (gates.MEASURE(ancilla.qubits[i], mem[i]) for i in range(self.n))
+
+        # Perform classical error detection with parity check matrix and maybe Z operators.
+        check_matrix = self.parity_check_c2
+        if include_operators:
+            check_matrix = np.concatenate([check_matrix, self.z_operator_matrix()], axis=0)
+        quil_classical_detect(prog, mem, data.x_errors, outcome, scratch, check_matrix)
+
+    def _error_detect_z(self, prog: Program, data: CodeBlock, ancilla: CodeBlock,
+                        outcome: MemoryReference, scratch: MemoryChunk, include_operators: bool):
+        """
+        Extend a Quil program to perform detection of Z errors on a data block. This this uses noisy
+        preparation of the ancilla for measurement, meaning the procedure is not totally reliable.
+        """
+        if len(scratch) < (self.n + self.r_1 + 2):
+            raise ValueError("scratch buffer is too small")
+
+        # Split up the scratch buffer.
+        mem = scratch[:self.n]
+        scratch = scratch[self.n:]
+
+        # Prepare a noisy ancilla. If measuring X operators as well, prepare in X eigenstate,
+        # otherwise prepare in Z eigenstate.
+        ancilla.reset(prog)
+        if include_operators:
+            prog += self.noisy_encode_plus(ancilla.qubits)
+        else:
+            prog += self.noisy_encode_zero(ancilla.qubits)
+
+        # Propagate Z errors from data block to ancilla block, then measure in the X basis.
+        prog += apply_transversally(gates.CNOT, ancilla.qubits, data.qubits)
+        prog += apply_transversally(gates.H, ancilla.qubits)
+        prog += (gates.MEASURE(ancilla.qubits[i], mem[i]) for i in range(self.n))
+
+        # Perform classical error detection with parity check matrix and maybe X operators.
+        check_matrix = self.parity_check_c1
+        if include_operators:
+            check_matrix = np.concatenate([check_matrix, self.x_operator_matrix()], axis=0)
+        quil_classical_detect(prog, mem, data.z_errors, outcome, scratch, check_matrix)
 
     @property
     def error_correct_scratch_size(self) -> int:
         """
         Returns the minimum size of the scratch buffer required by error_correct.
         """
-        return (self.n + self.r_1 + 2) + (self.n + self.r_2 + 2)
+        return self.encode_scratch_size
 
     def measure(self, prog: Program, data: CodeBlock, index: int, outcome: MemoryReference,
-                ancilla: CodeBlock, scratch: MemoryChunk, scratch_int: MemoryChunk):
+                ancilla_1: CodeBlock, ancilla_2: CodeBlock,
+                scratch: MemoryChunk, scratch_int: MemoryChunk):
         """
         Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
         logical |0> state.
@@ -435,8 +542,10 @@ class CSSCode(QECC):
             raise ValueError("only one logical qubit per code block")
         if data.n != self.n:
             raise ValueError("data code word is of incorrect size")
-        if ancilla.n != self.n:
-            raise ValueError("ancilla code word is of incorrect size")
+        if ancilla_1.n != self.n:
+            raise ValueError("ancilla_1 code word is of incorrect size")
+        if ancilla_2.n != self.n:
+            raise ValueError("ancilla_2 code word is of incorrect size")
         if len(scratch) < self.measure_scratch_size:
             raise ValueError("scratch buffer is too small")
         if len(scratch_int) < 1:
@@ -449,21 +558,30 @@ class CSSCode(QECC):
         noisy_scratch = scratch[trials:]
 
         for i in range(trials):
-            self.noisy_measure(prog, data, index, noisy_outcomes[i], ancilla, noisy_scratch)
+            self.noisy_measure(prog, data, index, noisy_outcomes[i], ancilla_1, ancilla_2,
+                               noisy_scratch)
             yield
+
+        outcome_bit = noisy_scratch[0]
+        quil_classical.majority_vote(prog, noisy_outcomes, outcome_bit, scratch_int)
 
         # Because of the stupid thing where the QVM relies on MEASURE to initialize classical
         # registers, do a superfluous measure here of the already trashed ancilla.
-        prog += gates.MEASURE(ancilla.qubits[0], outcome)
+        prog += gates.MEASURE(ancilla_1.qubits[0], outcome)
 
-        quil_classical.majority_vote(prog, noisy_outcomes, outcome, scratch_int)
+        # In case outcome is not a bit reference, do a CONVERT instead of a MOVE.
+        prog += gates.CONVERT(outcome, outcome_bit)
 
     @property
     def measure_scratch_size(self) -> int:
-        return self.n + self.r_2 + 2 + 2 * self.t + 1
+        return self.encode_scratch_size + 2 * self.t + 1
+
+    @property
+    def encode_scratch_size(self) -> int:
+        return 2 * self.n - max(self.r_1, self.r_2) + 4
 
     def noisy_measure(self, prog: Program, data: CodeBlock, index: int, outcome: MemoryReference,
-                      ancilla: CodeBlock, scratch: MemoryChunk):
+                      ancilla_1: CodeBlock, ancilla_2: CodeBlock, scratch: MemoryChunk):
         """
         Extend a Quil program to measure the logical qubit in the Z basis. Ancilla must be in a
         logical |0> state.
@@ -478,25 +596,27 @@ class CSSCode(QECC):
             raise ValueError("only one logical qubit per code block")
         if data.n != n:
             raise ValueError("data code word is of incorrect size")
-        if ancilla.n != n:
-            raise ValueError("ancilla code word is of incorrect size")
-        if len(scratch) < n + r_2 + 2:
+        if ancilla_1.n != n:
+            raise ValueError("ancilla_1 code word is of incorrect size")
+        if ancilla_2.n != n:
+            raise ValueError("ancilla_2 code word is of incorrect size")
+        if len(scratch) < self.error_correct_scratch_size:
             raise ValueError("scratch buffer is too small")
+
+        # Reset the ancilla to |0>.
+        self.encode_zero(prog, ancilla_1, ancilla_2, scratch)
 
         # Split up the scratch buffer.
         mem = scratch[:n]
         scratch = scratch[n:(n + r_2 + 2)]
-
-        # Reset the ancilla to |0>.
-        self.encode_zero(prog, ancilla)
 
         # Propagate each Z in the operator from data block to ancilla block for each, then measure
         # in the Z basis.
         #
         # This implements the technique from section 3 of
         # "Efficient fault-tolerant quantum computing" by Andrew M. Steane.
-        prog += apply_transversally(gates.CNOT, data.qubits, ancilla.qubits)
-        prog += (gates.MEASURE(ancilla.qubits[i], mem[i]) for i in range(self.n))
+        prog += apply_transversally(gates.CNOT, data.qubits, ancilla_1.qubits)
+        prog += (gates.MEASURE(ancilla_1.qubits[i], mem[i]) for i in range(self.n))
 
         # Opportunistically correct any X errors.
         quil_classical_correct(prog, mem, data.x_errors, scratch,
@@ -547,6 +667,34 @@ def quil_classical_correct(prog: Program, codeword: MemoryChunk, errors: MemoryC
 
     # Now correct codeword with updated corrections.
     prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
+
+def quil_classical_detect(prog: Program, codeword: MemoryChunk, errors: MemoryChunk,
+                          outcome: MemoryReference, scratch: MemoryChunk, parity_check):
+    """
+    Extend a Quil program with instructions to detect errors in a noisy classical codeword. Sets the
+    outcome bit if any errors are detected and unsets it otherwise.
+    """
+    m, n = parity_check.shape
+    if len(codeword) != n:
+        raise ValueError("codeword is of incorrect size")
+    if len(errors) != n:
+        raise ValueError("errors is of incorrect size")
+    if len(scratch) < m + 2:
+        raise ValueError("scratch buffer is too small")
+
+    # Add in existing known errors to the noisy codeword.
+    prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
+
+    # Compute the syndrome by multiplying by the parity check matrix.
+    syndrome = scratch[2:m+2]
+    quil_classical.matmul(prog, parity_check, codeword, syndrome, scratch[:2])
+
+    # Revert codeword back to the state without error corrections.
+    prog += (gates.XOR(codeword[i], errors[i]) for i in range(n))
+
+    # Set outcome only if syndrome is non-zero.
+    prog += gates.MOVE(outcome, 0)
+    prog += (gates.IOR(outcome, syndrome[i]) for i in range(m))
 
 def syndrome_table(parity_check):
     """

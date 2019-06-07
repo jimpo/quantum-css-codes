@@ -2,6 +2,7 @@ import numpy as np
 import pyquil
 import pyquil.gates as gates
 from pyquil.quil import Program
+from pyquil.quilatom import MemoryReference
 import unittest
 
 from css_code import CSSCode

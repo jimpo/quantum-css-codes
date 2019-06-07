@@ -51,25 +51,25 @@ def rewrite_program(raw_prog: Program, qecc: QECC) -> Program:
     }
 
     # Construct ancilla code blocks.
-    ancilla_x = new_logical_qubit(new_prog, qecc, "ancilla_x")
-    ancilla_z = new_logical_qubit(new_prog, qecc, "ancilla_y")
+    ancilla_1 = new_logical_qubit(new_prog, qecc, "ancilla_1")
+    ancilla_2 = new_logical_qubit(new_prog, qecc, "ancilla_2")
 
     # Classical scratch BIT registers for gates/measurements.
     scratch_size = max(qecc.n, qecc.measure_scratch_size)
     raw_scratch = new_prog.declare('scratch', 'BIT', scratch_size)
     scratch = MemoryChunk(raw_scratch, 0, raw_scratch.declared_size)
-    _initialize_memory(new_prog, raw_scratch, ancilla_x.qubits + ancilla_z.qubits)
+    _initialize_memory(new_prog, raw_scratch, ancilla_1.qubits + ancilla_2.qubits)
 
     # Classical scratch INTEGER registers.
     raw_scratch_int = new_prog.declare('scratch_int', 'INTEGER', 2)
     scratch_int = MemoryChunk(raw_scratch_int, 0, raw_scratch_int.declared_size)
-    _initialize_memory(new_prog, raw_scratch_int, ancilla_x.qubits + ancilla_z.qubits)
+    _initialize_memory(new_prog, raw_scratch_int, ancilla_1.qubits + ancilla_2.qubits)
 
-    perform_error_correction = _make_error_corrector(new_prog, qecc, ancilla_x, ancilla_z)
+    perform_error_correction = _make_error_corrector(new_prog, qecc, ancilla_1, ancilla_2)
 
     # Reset all logical qubits.
     for block in logical_qubits.values():
-        qecc.encode_zero(new_prog, block)
+        qecc.encode_zero(new_prog, block, ancilla_1, scratch)
 
     for inst in raw_prog.instructions:
         if isinstance(inst, Gate):
@@ -82,7 +82,7 @@ def rewrite_program(raw_prog: Program, qecc: QECC) -> Program:
             qubit = logical_qubits[_extract_qubit_index(inst.qubit)]
             # This should really use its own ancilla instead of sharing with the error correction,
             # but we need be extremely conservative with the number of qubits.
-            for _ in qecc.measure(new_prog, qubit, 0, inst.classical_reg, ancilla_z,
+            for _ in qecc.measure(new_prog, qubit, 0, inst.classical_reg, ancilla_1, ancilla_2,
                                   scratch, scratch_int):
                 # Since measurements are taken multiple times for redundancy, we need to perform
                 # rounds of error correction during the measurement routine.
@@ -101,7 +101,7 @@ def rewrite_program(raw_prog: Program, qecc: QECC) -> Program:
             raise NotImplementedError()
         elif isinstance(inst, Reset):
             for block in logical_qubits.values():
-                qecc.encode_zero(new_prog, block.qubits)
+                qecc.encode_zero(new_prog, block.qubits, ancilla_1, scratch)
         elif isinstance(inst, Declare):
             new_prog.inst(inst)
         elif isinstance(inst, Pragma):
@@ -145,7 +145,7 @@ def _mangle_label(label: Label) -> Label:
     return label
 
 def _make_error_corrector(
-        prog: Program, qecc: QECC, ancilla_x: CodeBlock, ancilla_z: CodeBlock
+        prog: Program, qecc: QECC, ancilla_1: CodeBlock, ancilla_2: CodeBlock
 ) -> Callable[[List[CodeBlock]], None]:
     # All error corrections share the same ancilla qubits and classical memory
     # chunk. This limits parallelism, which significantly reduces fault tolerance.
@@ -156,13 +156,10 @@ def _make_error_corrector(
     scratch_size = max(qecc.n, qecc.error_correct_scratch_size)
     raw_scratch = prog.declare('error_correct_scratch', 'BIT', scratch_size)
     scratch = MemoryChunk(raw_scratch, 0, raw_scratch.declared_size)
-    _initialize_memory(prog, raw_scratch, ancilla_x.qubits + ancilla_z.qubits)
+    _initialize_memory(prog, raw_scratch, ancilla_1.qubits + ancilla_1.qubits)
 
     def perform_error_correction(logical_qubits: List[CodeBlock]):
         for block in logical_qubits:
-            qecc.encode_plus(prog, ancilla_x)
-            qecc.encode_zero(prog, ancilla_z)
-            qecc.error_correct(prog, block, ancilla_x.qubits, ancilla_z.qubits, scratch)
+            qecc.error_correct(prog, block, ancilla_1, ancilla_2, scratch)
 
     return perform_error_correction
-
