@@ -570,7 +570,7 @@ class CSSCode(QECC):
         prog += gates.MEASURE(ancilla_1.qubits[0], outcome)
 
         # In case outcome is not a bit reference, do a CONVERT instead of a MOVE.
-        prog += gates.CONVERT(outcome, outcome_bit)
+        prog += gates.MOVE(outcome, outcome_bit)
 
     @property
     def measure_scratch_size(self) -> int:

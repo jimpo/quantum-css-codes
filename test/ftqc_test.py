@@ -19,10 +19,11 @@ class TestFTQC(unittest.TestCase):
         ])
         self.steane_7bit = CSSCode(h, h)
 
-    def test_single_x_program(self):
+    def test_single_X_program(self):
         raw_prog = Program()
         ro = raw_prog.declare('ro', 'BIT', 1)
-        raw_prog += (gates.I(0) for _ in range(3))
+        raw_prog += gates.X(0)
+        raw_prog += gates.X(0)
         raw_prog += gates.X(0)
         raw_prog += gates.MEASURE(0, ro[0])
 
@@ -32,7 +33,58 @@ class TestFTQC(unittest.TestCase):
         for result in results:
             self.assertEqual(result[0], 1)
 
-    def test_hamamard_z_program(self):
+    def test_single_Y_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += gates.Y(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    def test_single_Z_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += gates.Y(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    def test_XXX_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += gates.X(0)
+        raw_prog += gates.X(0)
+        raw_prog += gates.X(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    def test_YZ_program(self):
+        raw_prog = Program()
+        ro = raw_prog.declare('ro', 'BIT', 1)
+        raw_prog += gates.Y(0)
+        raw_prog += gates.Z(0)
+        raw_prog += gates.MEASURE(0, ro[0])
+
+        new_prog = ftqc.rewrite_program(raw_prog, self.steane_7bit)
+
+        results = self.run_program(new_prog)
+        for result in results:
+            self.assertEqual(result[0], 1)
+
+    def test_HZH_program(self):
         raw_prog = Program()
         ro = raw_prog.declare('ro', 'BIT', 1)
         raw_prog += gates.H(0)
