@@ -76,17 +76,29 @@ class CSSCode(QECC):
 
     @property
     def n(self):
+        """
+        Number of physical qubits per code block.
+        """
         return self._n
 
     @property
     def k(self):
+        """
+        Number of logical qubits per code block.
+        """
         return self._k
 
     @property
     def t(self):
+        """
+        Maximum number of errors per code block that can be corrected.
+        """
         return self._t
 
     def stabilisers(self) -> List[PauliTerm]:
+        """
+        Generate a list of generators of the stabiliser group.
+        """
         zeros = np.zeros(self.n, dtype='int')
         x_stabilisers = (
             pauli_term_for_row(self.parity_check_c1[i, :], zeros)
@@ -414,7 +426,7 @@ class CSSCode(QECC):
             return apply_transversally(gates.CZ, *qubits)
         if gate_name == 'S':
             return apply_transversally(
-                lambda qubit: (gates.Z(qubit), gates.S(qubit)), *qubits
+                lambda qubit: [gates.Z(qubit), gates.S(qubit)], *qubits
             )
         raise NotImplementedError("transversal {} not implemented".format(gate_name))
 

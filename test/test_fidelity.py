@@ -1,6 +1,8 @@
 import numpy as np
 import pyquil
+import pyquil.device as device
 import pyquil.gates as gates
+import pyquil.noise as noise
 from pyquil.quil import Program
 from pyquil.quilatom import MemoryReference
 import time
@@ -33,12 +35,12 @@ class TestFidelity(unittest.TestCase):
 
         is_correct = lambda result: result[0] == 1
 
-        trials = 1000
+        trials = 100000
         correct, elapsed = self.run_and_benchmark_program(raw_prog, trials, is_correct,
                                                           separate=False)
         print(correct, trials, elapsed)
 
-        trials = 10
+        trials = 20
         correct, elapsed = self.run_and_benchmark_program(ft_prog, trials, is_correct,
                                                           separate=True)
         print(correct, trials, elapsed)
@@ -46,7 +48,10 @@ class TestFidelity(unittest.TestCase):
     def run_and_benchmark_program(self, prog: Program, trials: int,
                                   is_correct: Callable[[List[int]], bool], separate: bool) -> int:
         n_qubits = len(prog.get_qubits())
-        qvm = pyquil.get_qc("{}q-qvm".format(n_qubits), noisy=True)
+        qvm = pyquil.get_qc("{}q-qvm".format(n_qubits))
+
+        # The paramaters are 10x less noisy than the defaults.
+        qvm.qam.noise_model = self.noise_model(qvm.device)
 
         if separate:
             elapsed = []
@@ -67,3 +72,11 @@ class TestFidelity(unittest.TestCase):
 
         correct = sum(is_correct(result) for result in results)
         return correct, elapsed
+
+    def noise_model(self, dev: device.Device) -> noise.NoiseModel:
+        return noise._decoherence_noise_model(
+            gates=device.gates_in_isa(dev.get_isa()),
+            T1=300e-6,
+            T2=300e-6,
+            ro_fidelity=0.99
+        )
